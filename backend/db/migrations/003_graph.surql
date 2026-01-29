@@ -1,0 +1,2 @@
+-- 003_graph.surql
+-- Esquema versionado: estructuras del grafo.

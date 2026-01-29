@@ -1,0 +1,4 @@
+"""
+logging.py
+Logging estructurado.
+"""

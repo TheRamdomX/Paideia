@@ -1,0 +1,2 @@
+-- 002_embeddings.surql
+-- Esquema versionado: almacenamiento de embeddings.
