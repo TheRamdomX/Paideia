@@ -1,0 +1,12 @@
+version: "3.9"
+
+services:
+  surrealdb:
+    image: surrealdb/surrealdb:latest
+    container_name: surrealdb
+    command: start --log info --user root --pass root file:/data/surreal.db
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./surreal-data:/data
+    restart: unless-stopped
