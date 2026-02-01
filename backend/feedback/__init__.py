@@ -16,6 +16,8 @@ from backend.feedback.signals import (
     get_signals_for_chunk,
     get_signals_for_concept,
     detect_feedback_pattern,
+    create_signal,
+    signal_to_dict,
 )
 
 from backend.feedback.analytics import (
@@ -23,6 +25,7 @@ from backend.feedback.analytics import (
     ChunkMetrics,
     ConceptMetrics,
     SystemMetrics,
+    ContentEngagement,
     detect_poor_chunks,
     track_confusion,
     get_confusing_concepts,
@@ -32,6 +35,8 @@ from backend.feedback.analytics import (
     get_chunk_quality_distribution,
     get_trending_concepts,
     clear_analytics_state,
+    compute_engagement,
+    aggregate_engagement,
 )
 
 from backend.feedback.graph_updates import (
@@ -39,6 +44,7 @@ from backend.feedback.graph_updates import (
     EdgeType,
     EdgeUpdate,
     RevectorizationTask,
+    FeedbackGraphUpdate,
     reinforce_edges,
     weaken_edges,
     schedule_revectorization,
@@ -49,6 +55,7 @@ from backend.feedback.graph_updates import (
     get_pending_tasks_summary,
     apply_pending_updates,
     clear_pending_tasks,
+    apply_feedback_to_graph,
 )
 
 __all__ = [
@@ -65,11 +72,14 @@ __all__ = [
     "get_signals_for_chunk",
     "get_signals_for_concept",
     "detect_feedback_pattern",
+    "create_signal",
+    "signal_to_dict",
     # analytics
     "ContentQuality",
     "ChunkMetrics",
     "ConceptMetrics",
     "SystemMetrics",
+    "ContentEngagement",
     "detect_poor_chunks",
     "track_confusion",
     "get_confusing_concepts",
@@ -79,11 +89,14 @@ __all__ = [
     "get_chunk_quality_distribution",
     "get_trending_concepts",
     "clear_analytics_state",
+    "compute_engagement",
+    "aggregate_engagement",
     # graph_updates
     "UpdateAction",
     "EdgeType",
     "EdgeUpdate",
     "RevectorizationTask",
+    "FeedbackGraphUpdate",
     "reinforce_edges",
     "weaken_edges",
     "schedule_revectorization",
@@ -94,4 +107,5 @@ __all__ = [
     "get_pending_tasks_summary",
     "apply_pending_updates",
     "clear_pending_tasks",
+    "apply_feedback_to_graph",
 ]

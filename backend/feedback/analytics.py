@@ -745,3 +745,129 @@ async def get_trending_concepts(
         }
         for m in sorted_concepts[:limit]
     ]
+
+
+# ==========================================
+# Content Engagement
+# ==========================================
+
+@dataclass
+class ContentEngagement:
+    """Métricas de engagement con el contenido."""
+    
+    query_id: str = ""
+    student_id: str = ""
+    
+    # Tiempos
+    dwell_time_seconds: float = 0.0
+    scroll_depth_percent: float = 0.0
+    
+    # Interacciones
+    clicks: int = 0
+    copies: int = 0
+    followup_questions: int = 0
+    
+    # Scores
+    engagement_score: float = 0.5
+    satisfaction_score: float = 0.5
+    
+    # Metadata
+    timestamp: Optional[datetime] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "query_id": self.query_id,
+            "student_id": self.student_id,
+            "dwell_time_seconds": self.dwell_time_seconds,
+            "scroll_depth_percent": self.scroll_depth_percent,
+            "clicks": self.clicks,
+            "copies": self.copies,
+            "followup_questions": self.followup_questions,
+            "engagement_score": self.engagement_score,
+            "satisfaction_score": self.satisfaction_score,
+            "timestamp": self.timestamp.isoformat() if self.timestamp else None,
+        }
+
+
+def compute_engagement(
+    signals: List[FeedbackSignal],
+    query_id: str = "",
+    student_id: str = "",
+) -> ContentEngagement:
+    """
+    Calcula métricas de engagement a partir de señales.
+    
+    Args:
+        signals: Lista de señales
+        query_id: ID de la consulta
+        student_id: ID del estudiante
+        
+    Returns:
+        ContentEngagement calculado
+    """
+    engagement = ContentEngagement(
+        query_id=query_id,
+        student_id=student_id,
+        timestamp=datetime.now(timezone.utc),
+    )
+    
+    for signal in signals:
+        if signal.signal_type == SignalType.DWELL_TIME:
+            engagement.dwell_time_seconds = float(signal.raw_value or 0)
+        elif signal.signal_type == SignalType.SCROLL_DEPTH:
+            engagement.scroll_depth_percent = float(signal.raw_value or 0)
+        elif signal.signal_type == SignalType.CLICK:
+            engagement.clicks += 1
+        elif signal.signal_type == SignalType.COPY:
+            engagement.copies += 1
+        elif signal.signal_type == SignalType.FOLLOWUP:
+            engagement.followup_questions += 1
+    
+    # Calcular scores
+    normalized = weight_feedback(signals) if signals else None
+    
+    if normalized:
+        engagement.satisfaction_score = normalized.overall_score
+    
+    # Engagement score basado en interacciones
+    engagement_factors = [
+        min(1.0, engagement.dwell_time_seconds / 60),  # Normalizar a 60 segundos
+        engagement.scroll_depth_percent / 100,
+        min(1.0, engagement.clicks / 3),
+        min(1.0, engagement.copies),
+    ]
+    
+    if engagement_factors:
+        engagement.engagement_score = sum(engagement_factors) / len(engagement_factors)
+    
+    return engagement
+
+
+async def aggregate_engagement(
+    student_id: str,
+    period_days: int = 7,
+) -> Dict[str, Any]:
+    """
+    Agrega métricas de engagement de un estudiante.
+    
+    Args:
+        student_id: ID del estudiante
+        period_days: Días a considerar
+        
+    Returns:
+        Métricas agregadas
+    """
+    # Por ahora retorna métricas simuladas
+    # En producción se consultaría la base de datos
+    return {
+        "student_id": student_id,
+        "period_days": period_days,
+        "total_queries": 0,
+        "avg_dwell_time": 0.0,
+        "avg_scroll_depth": 0.0,
+        "total_clicks": 0,
+        "total_copies": 0,
+        "avg_engagement_score": 0.5,
+        "avg_satisfaction_score": 0.5,
+    }

@@ -600,3 +600,81 @@ def detect_feedback_pattern(
         "confidence": 0.5,
         "average_score": sum(values) / len(values) if values else 0.5,
     }
+
+
+# ==========================================
+# Funciones de Creación de Señales
+# ==========================================
+
+def create_signal(
+    signal_type: SignalType,
+    query_id: str = "",
+    value: Optional[float] = None,
+    raw_value: Any = None,
+    chunk_ids: Optional[List[str]] = None,
+    concept_ids: Optional[List[str]] = None,
+    session_id: str = "",
+    student_id: str = "",
+    metadata: Optional[Dict[str, Any]] = None,
+) -> FeedbackSignal:
+    """
+    Crea una nueva señal de feedback.
+    
+    Args:
+        signal_type: Tipo de señal
+        query_id: ID de la consulta
+        value: Valor normalizado (0-1)
+        raw_value: Valor original
+        chunk_ids: IDs de chunks relacionados
+        concept_ids: IDs de conceptos relacionados
+        session_id: ID de sesión
+        student_id: ID del estudiante
+        metadata: Metadata adicional
+        
+    Returns:
+        FeedbackSignal creada
+    """
+    now = datetime.now(timezone.utc)
+    
+    # Determinar categoría
+    category = _determine_category(signal_type)
+    
+    # Normalizar valor si no se proporciona
+    if value is None:
+        value = _normalize_value(signal_type, raw_value)
+    
+    # Determinar polaridad
+    polarity = _determine_polarity(signal_type, value)
+    
+    # Calcular confianza
+    confidence = _calculate_signal_confidence(signal_type, {"value": raw_value})
+    
+    return FeedbackSignal(
+        signal_id=f"sig_{now.timestamp()}",
+        signal_type=signal_type,
+        category=category,
+        value=value,
+        raw_value=raw_value,
+        query_id=query_id,
+        chunk_ids=chunk_ids or [],
+        concept_ids=concept_ids or [],
+        session_id=session_id,
+        student_id=student_id,
+        timestamp=now,
+        polarity=polarity,
+        confidence=confidence,
+        metadata=metadata or {},
+    )
+
+
+def signal_to_dict(signal: FeedbackSignal) -> Dict[str, Any]:
+    """
+    Convierte una señal a diccionario.
+    
+    Args:
+        signal: Señal a convertir
+        
+    Returns:
+        Diccionario con datos de la señal
+    """
+    return signal.to_dict()

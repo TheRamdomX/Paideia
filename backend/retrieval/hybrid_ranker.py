@@ -40,6 +40,11 @@ class RankedResult:
     metadata: Dict[str, Any] = field(default_factory=dict)
     rank: int = 0
     
+    # Campos adicionales para contexto
+    source_id: Optional[str] = None  # ID del documento fuente
+    concepts: List[str] = field(default_factory=list)  # Conceptos asociados
+    highlights: List[str] = field(default_factory=list)  # Fragmentos relevantes
+    
     def to_dict(self) -> Dict[str, Any]:
         return {
             "id": self.id,
@@ -51,6 +56,9 @@ class RankedResult:
             "sources": [s.value for s in self.sources],
             "metadata": self.metadata,
             "rank": self.rank,
+            "source_id": self.source_id,
+            "concepts": self.concepts,
+            "highlights": self.highlights,
         }
 
 

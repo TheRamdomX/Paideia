@@ -796,3 +796,101 @@ async def apply_pending_updates() -> int:
     _pending_edge_updates[:] = [u for u in _pending_edge_updates if not u.applied]
     
     return applied
+
+
+# ==========================================
+# Feedback Graph Update
+# ==========================================
+
+@dataclass
+class FeedbackGraphUpdate:
+    """Resultado de aplicar feedback al grafo."""
+    
+    feedback_id: str = ""
+    query_id: str = ""
+    
+    # Actualizaciones realizadas
+    edges_reinforced: int = 0
+    edges_weakened: int = 0
+    edges_created: int = 0
+    
+    # Tareas programadas
+    revectorization_scheduled: bool = False
+    chunks_to_revectorize: List[str] = field(default_factory=list)
+    
+    # Estado
+    success: bool = True
+    error: Optional[str] = None
+    timestamp: Optional[datetime] = None
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "feedback_id": self.feedback_id,
+            "query_id": self.query_id,
+            "edges_reinforced": self.edges_reinforced,
+            "edges_weakened": self.edges_weakened,
+            "edges_created": self.edges_created,
+            "revectorization_scheduled": self.revectorization_scheduled,
+            "chunks_to_revectorize": self.chunks_to_revectorize,
+            "success": self.success,
+            "error": self.error,
+            "timestamp": self.timestamp.isoformat() if self.timestamp else None,
+        }
+
+
+async def apply_feedback_to_graph(
+    feedback: NormalizedFeedback,
+    chunk_ids: Optional[List[str]] = None,
+    concept_ids: Optional[List[str]] = None,
+) -> FeedbackGraphUpdate:
+    """
+    Aplica feedback al grafo de conocimiento.
+    
+    Args:
+        feedback: Feedback normalizado
+        chunk_ids: IDs de chunks relacionados
+        concept_ids: IDs de conceptos relacionados
+        
+    Returns:
+        FeedbackGraphUpdate con resultados
+    """
+    now = datetime.now(timezone.utc)
+    
+    result = FeedbackGraphUpdate(
+        feedback_id=feedback.query_id,
+        query_id=feedback.query_id,
+        timestamp=now,
+    )
+    
+    try:
+        chunk_ids = chunk_ids or []
+        concept_ids = concept_ids or []
+        
+        # Procesar según score
+        if feedback.overall_score >= 0.6:
+            # Feedback positivo -> reforzar
+            updates = await reinforce_edges(chunk_ids, concept_ids, feedback)
+            result.edges_reinforced = len(updates)
+            
+        elif feedback.overall_score <= 0.4:
+            # Feedback negativo -> debilitar
+            updates = await weaken_edges(chunk_ids, concept_ids, feedback)
+            result.edges_weakened = len(updates)
+            
+            # Programar re-vectorización si es muy malo
+            if feedback.overall_score <= 0.25 and chunk_ids:
+                task = await schedule_revectorization(
+                    chunk_ids=chunk_ids,
+                    reason=f"low_score_{feedback.overall_score:.2f}",
+                    priority=2,
+                )
+                result.revectorization_scheduled = True
+                result.chunks_to_revectorize = chunk_ids
+        
+        result.success = True
+        
+    except Exception as e:
+        result.success = False
+        result.error = str(e)
+    
+    return result
