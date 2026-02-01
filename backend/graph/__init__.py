@@ -45,6 +45,22 @@ from backend.graph.builders import (
     batch_link_concepts,
 )
 
+from backend.graph.traversal import (
+    TraversalStrategy,
+    GraphNode,
+    GraphPath,
+    TraversalResult,
+    get_traversal_config,
+    expand_concepts,
+    rank_paths,
+    find_paths_between,
+    limit_depth,
+    prune_by_score,
+    find_concepts_by_query,
+    get_related_concepts,
+    extract_subgraph,
+)
+
 __all__ = [
     # Schema
     "NodeType",
@@ -84,4 +100,18 @@ __all__ = [
     "batch_create_concepts",
     "batch_create_chunks",
     "batch_link_concepts",
+    # Traversal
+    "TraversalStrategy",
+    "GraphNode",
+    "GraphPath",
+    "TraversalResult",
+    "get_traversal_config",
+    "expand_concepts",
+    "rank_paths",
+    "find_paths_between",
+    "limit_depth",
+    "prune_by_score",
+    "find_concepts_by_query",
+    "get_related_concepts",
+    "extract_subgraph",
 ]
