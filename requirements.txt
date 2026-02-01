@@ -1,0 +1,31 @@
+# ============================================
+# PAIDEIA - Dependencias
+# ============================================
+
+# Framework Web
+fastapi>=0.109.0
+uvicorn[standard]>=0.27.0
+python-multipart>=0.0.6
+
+# Variables de Entorno
+python-dotenv>=1.0.0
+pydantic>=2.5.0
+pydantic-settings>=2.1.0
+
+# LLM Providers
+openai>=1.12.0
+google-generativeai>=0.4.0
+
+# Base de Datos
+surrealdb>=0.3.2
+
+# Procesamiento de Texto
+tiktoken>=0.5.0
+regex>=2023.12.0
+
+# Utilidades
+tenacity>=8.2.0
+httpx>=0.26.0
+
+# Async
+aiofiles>=23.2.0

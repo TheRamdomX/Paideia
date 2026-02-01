@@ -7,10 +7,33 @@ version: "3.9"
 services:
   surrealdb:
     image: surrealdb/surrealdb:latest
-    container_name: surrealdb
+    container_name: paideia-surrealdb
     command: start --log info --user root --pass root file:/data/surreal.db
     ports:
       - "8000:8000"
     volumes:
       - ./surreal-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: paideia-backend
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./backend:/app/backend
+      - ./.env:/app/.env
+    environment:
+      - SURREAL_URL=ws://surrealdb:8000/rpc
+      - PYTHONUNBUFFERED=1
+    depends_on:
+      surrealdb:
+        condition: service_healthy
     restart: unless-stopped

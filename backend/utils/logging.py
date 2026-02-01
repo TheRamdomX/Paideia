@@ -1,4 +1,0 @@
-"""
-logging.py
-Logging estructurado.
-"""

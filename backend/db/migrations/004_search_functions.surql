@@ -1,2 +1,0 @@
--- 004_search_functions.surql
--- Esquema versionado: funciones de búsqueda.
