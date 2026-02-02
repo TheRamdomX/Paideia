@@ -9,7 +9,7 @@ import asyncio
 from contextlib import asynccontextmanager
 from typing import Any, Optional, List, Dict
 
-from surrealdb import Surreal
+from surrealdb import AsyncSurreal
 
 from backend.settings import get_db_config
 
@@ -21,7 +21,7 @@ class SurrealDBClient:
     """
     
     _instance: Optional["SurrealDBClient"] = None
-    _client: Optional[Surreal] = None
+    _client: Optional[AsyncSurreal] = None
     _connected: bool = False
     
     def __new__(cls) -> "SurrealDBClient":
@@ -47,13 +47,13 @@ class SurrealDBClient:
         config = get_db_config()
         
         try:
-            self._client = Surreal(config["url"])
+            self._client = AsyncSurreal(config["url"])
             await self._client.connect()
             
-            # Autenticación
+            # Autenticación root
             await self._client.signin({
-                "user": config["user"],
-                "pass": config["password"],
+                "username": config["user"],
+                "password": config["password"],
             })
             
             # Seleccionar namespace y database

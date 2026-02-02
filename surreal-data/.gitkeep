@@ -1,3 +1,0 @@
-# Placeholder to ensure the `surreal-data` folder is tracked by git.
-# The real database file `surreal.db` is intentionally not committed to the repository.
-# Add `surreal.db` here locally when needed.

@@ -1,25 +1,27 @@
 # docker-compose.yml
-# Define SurrealDB, backend API y workers.
-# Permite reproducibilidad local sin fricción.
-
-version: "3.9"
+# Sistema completo de Paideia: SurrealDB + Backend API
+# Uso: docker-compose up -d
 
 services:
+  # ==========================================
+  # Base de Datos - SurrealDB
+  # ==========================================
   surrealdb:
     image: surrealdb/surrealdb:latest
     container_name: paideia-surrealdb
-    command: start --log info --user root --pass root file:/data/surreal.db
+    command: start --log info --user root --pass root surrealkv:/data/surreal.db
+    user: root
     ports:
       - "8000:8000"
     volumes:
-      - ./surreal-data:/data
+      - surreal-data:/data
     restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
+    networks:
+      - paideia-network
 
+  # ==========================================
+  # Backend API - FastAPI
+  # ==========================================
   backend:
     build:
       context: .
@@ -28,12 +30,40 @@ services:
     ports:
       - "8080:8080"
     volumes:
-      - ./backend:/app/backend
-      - ./.env:/app/.env
+      - ./backend:/app/backend  # Hot reload en desarrollo
+    env_file:
+      - .env
     environment:
+      # Override para conectar a SurrealDB en Docker
       - SURREAL_URL=ws://surrealdb:8000/rpc
+      - SURREAL_USER=root
+      - SURREAL_PASS=root
+      - SURREAL_NS=paideia
+      - SURREAL_DB=education
       - PYTHONUNBUFFERED=1
     depends_on:
-      surrealdb:
-        condition: service_healthy
+      - surrealdb
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    networks:
+      - paideia-network
+
+# ==========================================
+# Red
+# ==========================================
+networks:
+  paideia-network:
+    driver: bridge
+    name: paideia-network
+
+# ==========================================
+# Volúmenes persistentes
+# ==========================================
+volumes:
+  surreal-data:
+    driver: local
