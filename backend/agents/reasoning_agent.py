@@ -21,7 +21,12 @@ from backend.memory.student_profile import (
     load_profile,
     get_level_config,
 )
-from backend.models.llm import generate, generate_stream, get_llm
+from backend.models.llm import (
+    generate, 
+    generate_stream, 
+    get_llm,
+    generate_with_user_keys,
+)
 from backend.retrieval.hybrid_ranker import RankedResult
 from backend.utils.text import truncate_context, token_count, clean_whitespace
 
@@ -269,6 +274,10 @@ async def generate_answer(
     session_id: Optional[str] = None,
     student_id: Optional[str] = None,
     config: Optional[PromptConfig] = None,
+    user_openai_key: Optional[str] = None,
+    user_google_key: Optional[str] = None,
+    preferred_provider: Optional[str] = None,
+    user_model: Optional[str] = None,
 ) -> GeneratedAnswer:
     """
     Genera respuesta final usando el LLM.
@@ -279,6 +288,10 @@ async def generate_answer(
         session_id: ID de sesión
         student_id: ID del estudiante (para adaptación)
         config: Configuración del prompt
+        user_openai_key: API key de OpenAI del usuario (opcional)
+        user_google_key: API key de Google del usuario (opcional)
+        preferred_provider: Proveedor preferido ('openai' o 'google')
+        user_model: Modelo específico a usar (ej: 'gpt-4', 'gemini-pro')
         
     Returns:
         GeneratedAnswer con la respuesta
@@ -304,11 +317,15 @@ async def generate_answer(
         SYSTEM_PROMPTS[lang][ResponseStyle.DETAILED]
     )
     
-    # Generar respuesta
+    # Generar respuesta (siempre usar generate_with_user_keys para lógica unificada)
     try:
-        answer_text = await generate(
+        answer_text = await generate_with_user_keys(
             prompt=prompt,
             system_prompt=system_prompt,
+            user_openai_key=user_openai_key,
+            user_google_key=user_google_key,
+            preferred_provider=preferred_provider,
+            user_model=user_model,
             temperature=0.7,
             max_tokens=2048,
         )

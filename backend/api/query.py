@@ -156,8 +156,12 @@ def _get_cache_key(question: str, student_id: Optional[str]) -> str:
 )
 async def query_student(
     request: QueryRequest,
-    x_session_id: Optional[str] = Header(default=None),
-    x_student_id: Optional[str] = Header(default=None),
+    x_session_id: Optional[str] = Header(default=None, alias="X-Session-ID"),
+    x_student_id: Optional[str] = Header(default=None, alias="X-Student-ID"),
+    x_openai_key: Optional[str] = Header(default=None, alias="X-OpenAI-Key"),
+    x_google_key: Optional[str] = Header(default=None, alias="X-Google-Key"),
+    x_preferred_provider: Optional[str] = Header(default=None, alias="X-Preferred-Provider"),
+    x_model: Optional[str] = Header(default=None, alias="X-Model"),
     db: Any = Depends(get_db),
 ) -> QueryResponse:
     """
@@ -204,18 +208,18 @@ async def query_student(
     retrieval_result = await retrieve(
         query=request.question,
         strategy=strategy_decision,
-        session_id=session_id,
+        student_id=student_id,
     )
     
     # Re-score si hay student_id
     if student_id:
         scored_results = await score_results(
-            results=retrieval_result.chunks,
+            results=retrieval_result.results,
             query=request.question,
             student_id=student_id,
         )
     else:
-        scored_results = retrieval_result.chunks
+        scored_results = retrieval_result.results
     
     # 4. Configurar prompt
     prompt_config = PromptConfig(
@@ -226,13 +230,41 @@ async def query_student(
         prompt_config.max_context_tokens = request.max_context
     
     # 5. Generar respuesta
-    answer = await generate_answer(
-        query=request.question,
-        context_chunks=scored_results,
-        session_id=session_id,
-        student_id=student_id,
-        config=prompt_config,
-    )
+    try:
+        answer = await generate_answer(
+            query=request.question,
+            context_chunks=scored_results,
+            session_id=session_id,
+            student_id=student_id,
+            config=prompt_config,
+            user_openai_key=x_openai_key,
+            user_google_key=x_google_key,
+            preferred_provider=x_preferred_provider,
+            user_model=x_model,
+        )
+    except ValueError as e:
+        # Errores de configuración (API key inválida, modelo no encontrado)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+    except Exception as e:
+        error_msg = str(e).lower()
+        if "not found" in error_msg or "404" in error_msg:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Modelo no encontrado. Verifica el nombre del modelo.",
+            )
+        elif "api key" in error_msg or "invalid" in error_msg:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="API key inválida o sin permisos.",
+            )
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Error al generar respuesta: {str(e)[:200]}",
+            )
     
     # 6. Evaluar respuesta
     evaluation = await evaluate_answer(
@@ -261,6 +293,10 @@ async def query_student(
             session_id=session_id,
             student_id=student_id,
             config=prompt_config,
+            user_openai_key=x_openai_key,
+            user_google_key=x_google_key,
+            preferred_provider=x_preferred_provider,
+            user_model=x_model,
         )
         
         # Re-evaluar
@@ -366,7 +402,7 @@ async def query_stream(
         
         async for chunk in generate_answer_stream(
             query=request.question,
-            context_chunks=retrieval_result.chunks,
+            context_chunks=retrieval_result.results,
             session_id=session_id,
             student_id=student_id,
             config=prompt_config,
@@ -430,18 +466,18 @@ async def query_debug(
     retrieval_result = await retrieve(
         query=request.question,
         strategy=strategy_decision,
-        session_id=session_id,
+        student_id=student_id,
     )
     
     # Re-score
     if student_id:
         scored_results = await score_results(
-            results=retrieval_result.chunks,
+            results=retrieval_result.results,
             query=request.question,
             student_id=student_id,
         )
     else:
-        scored_results = retrieval_result.chunks
+        scored_results = retrieval_result.results
     
     # Configuración
     prompt_config = PromptConfig(

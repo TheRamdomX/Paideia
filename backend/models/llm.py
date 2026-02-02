@@ -15,6 +15,7 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 from backend.settings import (
     LLMProvider,
     get_model_config,
+    get_model_config_with_user_keys,
     get_settings,
 )
 
@@ -221,8 +222,9 @@ class GoogleLLM(BaseLLM):
         return self._model
     
     @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=2, max=10)
+        stop=stop_after_attempt(2),
+        wait=wait_exponential(multiplier=1, min=1, max=5),
+        reraise=True
     )
     async def generate(
         self,
@@ -245,14 +247,29 @@ class GoogleLLM(BaseLLM):
         if system_prompt:
             full_prompt = f"{system_prompt}\n\n{prompt}"
         
-        # Gemini es síncrono, lo ejecutamos en thread pool
-        loop = asyncio.get_event_loop()
-        response = await loop.run_in_executor(
-            None,
-            lambda: self.model_instance.generate_content(full_prompt)
-        )
-        
-        return response.text if response.text else ""
+        try:
+            # Gemini es síncrono, lo ejecutamos en thread pool
+            loop = asyncio.get_event_loop()
+            response = await loop.run_in_executor(
+                None,
+                lambda: self.model_instance.generate_content(full_prompt)
+            )
+            
+            return response.text if response.text else ""
+        except Exception as e:
+            error_msg = str(e).lower()
+            if "not found" in error_msg or "404" in error_msg:
+                raise ValueError(
+                    f"Modelo '{self.model}' no encontrado. "
+                    f"Modelos válidos: gemini-2.0-flash, gemini-1.5-flash, gemini-1.5-pro"
+                ) from e
+            elif "api key" in error_msg or "invalid" in error_msg or "unauthorized" in error_msg:
+                raise ValueError(
+                    "API key de Google inválida o sin permisos. "
+                    "Verifica tu key en https://aistudio.google.com/apikey"
+                ) from e
+            else:
+                raise
     
     async def generate_stream(
         self,
@@ -503,3 +520,83 @@ def reset_llm() -> None:
     """Resetea la instancia del LLM (útil para testing)."""
     global _llm_instance
     _llm_instance = None
+
+
+def get_llm_with_user_keys(
+    user_openai_key: Optional[str] = None,
+    user_google_key: Optional[str] = None,
+    preferred_provider: Optional[str] = None,
+    user_model: Optional[str] = None,
+) -> BaseLLM:
+    """
+    Obtiene una instancia de LLM usando configuración del usuario o servidor.
+    
+    MODO EXCLUSIVO:
+    - Si el usuario envía API key → usa SOLO config del usuario
+    - Si NO envía API key → usa SOLO config del servidor
+    
+    Args:
+        user_openai_key: API key de OpenAI del usuario
+        user_google_key: API key de Google del usuario
+        preferred_provider: Proveedor preferido ('openai' o 'google')
+        user_model: Modelo específico (ej: 'gpt-4', 'gpt-4o-mini', 'gemini-pro')
+        
+    Returns:
+        Instancia de LLM configurada
+        
+    Raises:
+        ValueError: Si no hay API key disponible
+    """
+    config = get_model_config_with_user_keys(
+        user_openai_key=user_openai_key,
+        user_google_key=user_google_key,
+        preferred_provider=preferred_provider,
+        user_model=user_model,
+    )
+    
+    if not config.get("has_api_key", False):
+        raise ValueError(
+            "No hay API key disponible. Configure OPENAI_API_KEY o GOOGLE_API_KEY "
+            "en el servidor, o envíe su API key en los headers X-OpenAI-Key o X-Google-Key"
+        )
+    
+    return select_model(
+        provider=config["provider"],
+        model=config["model"],
+        api_key=config["api_key"],
+        temperature=config["temperature"],
+        max_tokens=config["max_tokens"],
+    )
+
+
+async def generate_with_user_keys(
+    prompt: str,
+    system_prompt: Optional[str] = None,
+    user_openai_key: Optional[str] = None,
+    user_google_key: Optional[str] = None,
+    preferred_provider: Optional[str] = None,
+    user_model: Optional[str] = None,
+    **kwargs
+) -> str:
+    """
+    Genera texto usando configuración del usuario o servidor.
+    
+    Args:
+        prompt: Prompt del usuario
+        system_prompt: Prompt de sistema opcional
+        user_openai_key: API key de OpenAI del usuario
+        user_google_key: API key de Google del usuario
+        preferred_provider: Proveedor preferido
+        user_model: Modelo específico a usar
+        **kwargs: Argumentos adicionales
+        
+    Returns:
+        Texto generado
+    """
+    llm = get_llm_with_user_keys(
+        user_openai_key=user_openai_key,
+        user_google_key=user_google_key,
+        preferred_provider=preferred_provider,
+        user_model=user_model,
+    )
+    return await llm.generate(prompt, system_prompt, **kwargs)

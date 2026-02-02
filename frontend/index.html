@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Paideia - Asistente Educativo</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="app-container">
+        <!-- Header -->
+        <header class="header">
+            <div class="logo">
+                <span class="logo-icon">🎓</span>
+                <h1>Paideia</h1>
+            </div>
+            <div class="user-section">
+                <button id="btn-user-config" class="btn-icon" title="Configurar Usuario">
+                    <span>👤</span>
+                    <span id="current-user-display">Sin identificar</span>
+                </button>
+            </div>
+        </header>
+
+        <!-- Modal de configuración de usuario -->
+        <div id="user-modal" class="modal hidden">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h2>⚙️ Configuración</h2>
+                    <button id="btn-close-modal" class="btn-close">&times;</button>
+                </div>
+                <div class="modal-body">
+                    <!-- Sección de Identificación -->
+                    <div class="config-section">
+                        <h3>👤 Identificación</h3>
+                        <p>Tu ID de estudiante para personalizar la experiencia.</p>
+                        <div class="input-group">
+                            <label for="student-id-input">ID de Estudiante</label>
+                            <input 
+                                type="text" 
+                                id="student-id-input" 
+                                placeholder="ej: estudiante123"
+                                autocomplete="off"
+                            >
+                        </div>
+                    </div>
+
+                    <!-- Sección de API Keys -->
+                    <div class="config-section">
+                        <h3>🔑 API Keys (Opcional)</h3>
+                        <p>Puedes usar tus propias API keys. Si no las configuras, se usarán las del servidor (si están disponibles).</p>
+                        
+                        <div class="input-group">
+                            <label for="openai-key-input">
+                                <span class="provider-icon">🤖</span> OpenAI API Key
+                            </label>
+                            <input 
+                                type="password" 
+                                id="openai-key-input" 
+                                placeholder="sk-..."
+                                autocomplete="off"
+                            >
+                        </div>
+                        
+                        <div class="input-group">
+                            <label for="google-key-input">
+                                <span class="provider-icon">💎</span> Google AI API Key
+                            </label>
+                            <input 
+                                type="password" 
+                                id="google-key-input" 
+                                placeholder="AI..."
+                                autocomplete="off"
+                            >
+                        </div>
+
+                        <div class="input-group">
+                            <label for="preferred-provider">Proveedor Preferido</label>
+                            <select id="preferred-provider">
+                                <option value="">Automático</option>
+                                <option value="openai">OpenAI (GPT)</option>
+                                <option value="google">Google (Gemini)</option>
+                            </select>
+                        </div>
+
+                        <div class="input-group">
+                            <label for="model-select">Modelo</label>
+                            <select id="model-select">
+                                <option value="">Por defecto</option>
+                                <optgroup label="OpenAI">
+                                    <option value="gpt-4o-mini">GPT-4o Mini (rápido)</option>
+                                    <option value="gpt-4o">GPT-4o (potente)</option>
+                                    <option value="gpt-4-turbo">GPT-4 Turbo</option>
+                                    <option value="gpt-3.5-turbo">GPT-3.5 Turbo (económico)</option>
+                                </optgroup>
+                                <optgroup label="Google Gemini">
+                                    <option value="gemma-3-27b-it">Gemma 3 (Recomendado)</option>
+                                    <option value="gemini-2.5-flash">Gemini 2.5 Flash (rápido)</option>
+                                    <option value="gemini-3-flash-preview">Gemini 3 Flash (rápido)</option>
+                                    <option value="gemini-3-pro-preview">Gemini 3 Pro (potente)</option>
+                                </optgroup>
+                            </select>
+                        </div>
+                    </div>
+
+                    <div class="modal-actions">
+                        <button id="btn-save-user" class="btn btn-primary">Guardar</button>
+                        <button id="btn-clear-user" class="btn btn-secondary">Limpiar Todo</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Chat Container -->
+        <main class="chat-container">
+            <div id="chat-messages" class="chat-messages">
+                <!-- Welcome message -->
+                <div class="message assistant">
+                    <div class="message-avatar">🎓</div>
+                    <div class="message-content">
+                        <p>¡Hola! Soy <strong>Paideia</strong>, tu asistente educativo.</p>
+                        <p>Puedo ayudarte a aprender sobre cualquier tema. También puedes subir documentos (PDF, TXT, MD) para que los analice.</p>
+                        <p class="hint">💡 Tip: Configura tu ID de estudiante para una experiencia personalizada.</p>
+                    </div>
+                </div>
+            </div>
+        </main>
+
+        <!-- Input Area -->
+        <footer class="input-area">
+            <div class="input-container">
+                <button id="btn-upload" class="btn-icon" title="Subir archivo">
+                    📎
+                </button>
+                <input 
+                    type="file" 
+                    id="file-input" 
+                    accept=".pdf,.txt,.md,.markdown"
+                    hidden
+                >
+                <textarea 
+                    id="message-input" 
+                    placeholder="Escribe tu pregunta..."
+                    rows="1"
+                ></textarea>
+                <button id="btn-send" class="btn-send" title="Enviar mensaje">
+                    ➤
+                </button>
+            </div>
+            <div id="upload-preview" class="upload-preview hidden">
+                <span id="file-name"></span>
+                <button id="btn-cancel-upload" class="btn-cancel">&times;</button>
+            </div>
+        </footer>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>

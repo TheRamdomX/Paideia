@@ -100,6 +100,18 @@ class Settings(BaseSettings):
     enable_cache: bool = Field(default=True, description="Habilitar caché de respuestas")
     enable_feedback: bool = Field(default=True, description="Habilitar sistema de feedback")
     
+    # ==========================================
+    # User API Keys Configuration
+    # ==========================================
+    allow_user_api_keys: bool = Field(
+        default=True, 
+        description="Permitir que usuarios envíen sus propias API keys"
+    )
+    require_api_key: bool = Field(
+        default=False,
+        description="Requerir API key (del backend o usuario) para funcionar"
+    )
+    
     model_config = {
         "env_file": ".env",
         "env_file_encoding": "utf-8",
@@ -164,6 +176,134 @@ def get_model_config() -> dict:
         }
     else:
         raise ValueError(f"Proveedor LLM no soportado: {settings.llm_provider}")
+
+
+def get_model_config_with_user_keys(
+    user_openai_key: Optional[str] = None,
+    user_google_key: Optional[str] = None,
+    preferred_provider: Optional[str] = None,
+    user_model: Optional[str] = None,
+) -> dict:
+    """
+    Devuelve la configuración del modelo LLM.
+    
+    MODO EXCLUSIVO:
+    - Si el usuario envía API key → se usa SOLO la del usuario (ignora servidor)
+    - Si NO envía API key → se usa SOLO la del servidor
+    
+    Args:
+        user_openai_key: API key de OpenAI del usuario
+        user_google_key: API key de Google del usuario  
+        preferred_provider: Proveedor preferido ('openai' o 'google')
+        user_model: Modelo específico a usar (ej: 'gpt-4', 'gemini-pro')
+        
+    Returns:
+        dict: Configuración del modelo
+        
+    Raises:
+        ValueError: Si no hay API key disponible
+    """
+    settings = get_settings()
+    
+    # Determinar si el usuario está enviando sus propias keys
+    user_has_key = bool(user_openai_key or user_google_key)
+    
+    # MODO EXCLUSIVO: Usuario O Servidor, no ambos
+    if user_has_key:
+        # === MODO USUARIO: Solo usar keys del usuario ===
+        if not settings.allow_user_api_keys:
+            raise ValueError("El servidor no permite API keys de usuario.")
+        
+        # Determinar proveedor basado en la key enviada o preferencia
+        if preferred_provider and preferred_provider.lower() == "openai" and user_openai_key:
+            provider = LLMProvider.OPENAI
+            api_key = user_openai_key
+            default_model = "gpt-4o-mini"
+        elif preferred_provider and preferred_provider.lower() == "google" and user_google_key:
+            provider = LLMProvider.GOOGLE
+            api_key = user_google_key
+            default_model = "gemini-1.5-flash"
+        elif user_openai_key:
+            provider = LLMProvider.OPENAI
+            api_key = user_openai_key
+            default_model = "gpt-4o-mini"
+        elif user_google_key:
+            provider = LLMProvider.GOOGLE
+            api_key = user_google_key
+            default_model = "gemini-1.5-flash"
+        else:
+            raise ValueError("Debe proporcionar una API key válida.")
+        
+        # Usar modelo del usuario o default
+        model = user_model if user_model else default_model
+        
+        return {
+            "provider": provider,
+            "model": model,
+            "api_key": api_key,
+            "temperature": settings.llm_temperature,
+            "max_tokens": settings.llm_max_tokens,
+            "has_api_key": True,
+            "is_user_key": True,
+            "source": "user",
+        }
+    
+    else:
+        # === MODO SERVIDOR: Solo usar keys del servidor ===
+        server_openai = settings.openai_api_key
+        server_google = settings.google_api_key
+        
+        # Verificar que las keys del servidor no sean placeholders
+        if server_openai and server_openai.startswith("sk-your"):
+            server_openai = None
+        if server_google and server_google in ["your-google-api-key", ""]:
+            server_google = None
+        
+        # Determinar proveedor según configuración del servidor
+        if settings.llm_provider == LLMProvider.OPENAI and server_openai:
+            provider = LLMProvider.OPENAI
+            api_key = server_openai
+            model = settings.openai_model
+        elif settings.llm_provider == LLMProvider.GOOGLE and server_google:
+            provider = LLMProvider.GOOGLE
+            api_key = server_google
+            model = settings.google_model
+        # Fallback a cualquier key disponible
+        elif server_openai:
+            provider = LLMProvider.OPENAI
+            api_key = server_openai
+            model = settings.openai_model
+        elif server_google:
+            provider = LLMProvider.GOOGLE
+            api_key = server_google
+            model = settings.google_model
+        else:
+            # No hay keys configuradas en el servidor
+            if settings.require_api_key:
+                raise ValueError(
+                    "No hay API key configurada en el servidor. "
+                    "Proporcione su propia API key en la configuración."
+                )
+            return {
+                "provider": None,
+                "model": None,
+                "api_key": None,
+                "temperature": settings.llm_temperature,
+                "max_tokens": settings.llm_max_tokens,
+                "has_api_key": False,
+                "source": "none",
+            }
+        
+        return {
+            "provider": provider,
+            "model": model,
+            "api_key": api_key,
+            "temperature": settings.llm_temperature,
+            "max_tokens": settings.llm_max_tokens,
+            "has_api_key": True,
+            "is_user_key": False,
+            "source": "server",
+        }
 
 
 def get_embedding_config() -> dict:
