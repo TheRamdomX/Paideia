@@ -197,13 +197,22 @@ curl -X POST "http://localhost:8080/api/v1/query/" \
     }
   ],
   "confidence": 0.89,
-  "style_used": "explanatory",
+  "learning_mode": "concept",
   "followup_suggestions": [
     "¿Cuáles son las fases de la fotosíntesis?",
     "¿Qué papel juega la clorofila?"
   ]
 }
 ```
+
+#### Modos pedagógicos (LearningMode)
+
+Podés forzar el comportamiento del asistente usando `learning_mode`.
+
+- **Automático** (recomendado): omití `learning_mode` y el backend lo detecta.
+- **`concept`**: explicaciones teóricas/definiciones.
+- **`practice`**: resolución paso a paso.
+- **`exercise_list`**: lista ejercicios (sin resolverlos).
 
 #### Consulta con Streaming
 ```bash
@@ -212,7 +221,17 @@ curl -X POST "http://localhost:8080/api/v1/query/" \
   -d '{
     "question": "Explícame el ciclo de Krebs",
     "stream": true,
-    "style": "step_by_step"
+    "learning_mode": "practice"
+  }'
+```
+
+#### Consulta forzando modo (sin streaming)
+```bash
+curl -X POST "http://localhost:8080/api/v1/query/" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "question": "Lista ejercicios de derivadas",
+    "learning_mode": "exercise_list"
   }'
 ```
 
@@ -310,6 +329,13 @@ curl "http://localhost:8080/api/v1/feedback/summary/student/estudiante123?days=3
 ## 📁 Estructura del Proyecto
 
 ```
+frontend/
+├── index.html              # UI (chat + selector de modo)
+├── app.js                  # Lógica del cliente (envía learning_mode opcional)
+├── styles.css              # Estilos
+├── nginx.conf              # Proxy /api -> backend
+└── Dockerfile              # Imagen del frontend
+
 backend/
 ├── main.py                 # Aplicación FastAPI
 ├── settings.py             # Configuración
@@ -321,6 +347,7 @@ backend/
 │   └── feedback.py         # Sistema de feedback
 │
 ├── agents/                 # Agentes inteligentes
+│   ├── mode_router.py      # Eleccion de Modo
 │   ├── retrieval_agent.py  # Decisión de estrategia
 │   ├── reasoning_agent.py  # Generación de respuestas
 │   └── reflection_agent.py # Evaluación de calidad
@@ -369,6 +396,23 @@ backend/
 
 ---
 
+## 🖥️ Frontend
+
+El frontend es una SPA simple (HTML/CSS/JS) servida por Nginx (en Docker). Usa `API_BASE_URL = /api/v1` y el proxy de Nginx redirige `/api` al backend.
+
+### Selector de modo pedagógico
+
+En la parte inferior del chat hay un selector con 4 opciones:
+
+- **Auto**: no envía `learning_mode` (el backend detecta el modo).
+- **Concepto**: envía `learning_mode: "concept"`
+- **Práctica**: envía `learning_mode: "practice"`
+- **Ejercicios**: envía `learning_mode: "exercise_list"`
+
+La selección se guarda en `localStorage` como `paideia_learning_mode`.
+
+---
+
 ## 🔧 Configuración Avanzada
 
 ### Ajustar Chunking
@@ -390,13 +434,14 @@ TOP_K = 10                # Resultados a retornar
 MIN_SCORE = 0.3           # Umbral mínimo
 ```
 
-### Estilos de Respuesta
-Los prompts del sistema soportan múltiples estilos pedagógicos:
-- `concise`: Respuestas breves y directas
-- `detailed`: Explicaciones completas
-- `socratic`: Guía mediante preguntas
-- `step_by_step`: Explicación paso a paso
-- `analogy`: Uso de analogías y ejemplos
+### Modos pedagógicos (LearningMode) - Configuración
+
+El backend soporta modos pedagógicos. Podés dejarlo en automático u forzar uno en la request con `learning_mode`:
+
+- **Automático**: omití `learning_mode` y el backend lo detecta.
+- `concept`: explicaciones teóricas/definiciones.
+- `practice`: resolución paso a paso.
+- `exercise_list`: lista ejercicios disponibles (sin resolverlos).
 
 ---
 

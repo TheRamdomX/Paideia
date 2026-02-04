@@ -18,6 +18,7 @@ const state = {
     googleKey: localStorage.getItem('paideia_google_key') || null,
     preferredProvider: localStorage.getItem('paideia_preferred_provider') || null,
     model: localStorage.getItem('paideia_model') || null,
+    learningMode: localStorage.getItem('paideia_learning_mode') || null,  // null = automático
     isLoading: false,
     chatHistory: JSON.parse(localStorage.getItem('paideia_chat_history') || '[]'),
     documents: []  // Lista de documentos ingestados
@@ -246,15 +247,23 @@ async function sendQuery(question) {
         headers['X-Model'] = state.model;
     }
 
+    // Construir body con learning_mode opcional
+    const body = {
+        question,
+        session_id: state.sessionId,
+        student_id: state.studentId,
+        use_cache: true
+    };
+    
+    // Solo agregar learning_mode si está seleccionado (no automático)
+    if (state.learningMode) {
+        body.learning_mode = state.learningMode;
+    }
+
     const response = await fetch(`${API_BASE_URL}/query`, {
         method: 'POST',
         headers,
-        body: JSON.stringify({
-            question,
-            session_id: state.sessionId,
-            student_id: state.studentId,
-            use_cache: true
-        })
+        body: JSON.stringify(body)
     });
 
     if (!response.ok) {
@@ -687,6 +696,57 @@ function setupDragAndDrop() {
 }
 
 // ==========================================
+// Mode Selector (Selector de Modo Pedagógico)
+// ==========================================
+
+function initModeSelector() {
+    const modeButtons = document.querySelectorAll('.mode-btn');
+    
+    // Restaurar modo guardado
+    if (state.learningMode) {
+        modeButtons.forEach(btn => {
+            btn.classList.remove('active');
+            if (btn.dataset.mode === state.learningMode) {
+                btn.classList.add('active');
+            }
+        });
+    }
+    
+    // Agregar event listeners
+    modeButtons.forEach(btn => {
+        btn.addEventListener('click', () => handleModeChange(btn));
+    });
+}
+
+function handleModeChange(clickedBtn) {
+    const modeButtons = document.querySelectorAll('.mode-btn');
+    
+    // Actualizar estado visual
+    modeButtons.forEach(btn => btn.classList.remove('active'));
+    clickedBtn.classList.add('active');
+    
+    // Actualizar estado y localStorage
+    const newMode = clickedBtn.dataset.mode || null; // '' se convierte en null (automático)
+    state.learningMode = newMode;
+    
+    if (newMode) {
+        localStorage.setItem('paideia_learning_mode', newMode);
+    } else {
+        localStorage.removeItem('paideia_learning_mode');
+    }
+    
+    // Feedback visual
+    const modeNames = {
+        '': 'Automático',
+        'concept': 'Concepto',
+        'practice': 'Práctica', 
+        'exercise_list': 'Lista de Ejercicios'
+    };
+    
+    console.log(`🎯 Modo pedagógico: ${modeNames[clickedBtn.dataset.mode] || 'Automático'}`);
+}
+
+// ==========================================
 // Inicialización
 // ==========================================
 
@@ -699,6 +759,9 @@ function init() {
     
     // Cargar lista de documentos inicial
     loadDocumentsList();
+    
+    // Inicializar selector de modo
+    initModeSelector();
 
     // Event listeners - Envío de mensajes
     elements.btnSend.addEventListener('click', handleSendMessage);

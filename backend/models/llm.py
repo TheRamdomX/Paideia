@@ -12,6 +12,8 @@ from typing import Any, AsyncGenerator, Dict, List, Optional, Union
 
 from tenacity import retry, stop_after_attempt, wait_exponential
 
+from google.genai import types
+
 from backend.settings import (
     LLMProvider,
     get_model_config,
@@ -225,9 +227,7 @@ class GoogleLLM(BaseLLM):
         Returns:
             Texto generado
         """
-        try:
-            from google.genai import types
-            
+        try:            
             # Construir contenido
             contents = []
             if system_prompt:
@@ -289,9 +289,7 @@ class GoogleLLM(BaseLLM):
             
         Yields:
             Chunks de texto generado
-        """
-        from google.genai import types
-        
+        """        
         # Construir contenido
         contents = []
         if system_prompt:
@@ -338,9 +336,7 @@ class GoogleLLM(BaseLLM):
             
         Returns:
             Texto generado
-        """
-        from google.genai import types
-        
+        """        
         # Convertir mensajes a formato Gemini
         contents = []
         

@@ -2,6 +2,7 @@
 reasoning_agent.py
 Agente de Razonamiento - Genera respuestas finales con contexto curado.
 Adapta el nivel pedagógico según el perfil del estudiante.
+Soporta modos pedagógicos: CONCEPT, PRACTICE, EXERCISE_LIST.
 """
 
 from __future__ import annotations
@@ -10,6 +11,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
+from backend.agents.mode_router import LearningMode
 from backend.memory.session_memory import (
     TurnRole,
     get_context_for_llm,
@@ -35,25 +37,16 @@ from backend.utils.text import truncate_context, token_count, clean_whitespace
 # Configuración y Estructuras
 # ==========================================
 
-class ResponseStyle(str, Enum):
-    """Estilos de respuesta."""
-    CONCISE = "concise"       # Breve y directo
-    DETAILED = "detailed"     # Explicación completa
-    STEP_BY_STEP = "step_by_step"  # Paso a paso
-    SOCRATIC = "socratic"     # Guía con preguntas
-    EXAMPLE_BASED = "example_based"  # Basado en ejemplos
-
 
 @dataclass
 class PromptConfig:
     """Configuración para construcción de prompts."""
     
     max_context_tokens: int = 3000
-    max_conversation_tokens: int = 1000
+    max_conversation_tokens: int = 4000
     include_examples: bool = True
     include_sources: bool = True
     language: str = "es"
-    style: ResponseStyle = ResponseStyle.DETAILED
     
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -62,7 +55,6 @@ class PromptConfig:
             "include_examples": self.include_examples,
             "include_sources": self.include_sources,
             "language": self.language,
-            "style": self.style.value,
         }
 
 
@@ -75,7 +67,7 @@ class GeneratedAnswer:
     concepts_covered: List[str] = field(default_factory=list)
     confidence: float = 0.0
     tokens_used: int = 0
-    style_used: ResponseStyle = ResponseStyle.DETAILED
+    learning_mode: LearningMode = LearningMode.CONCEPT
     metadata: Dict[str, Any] = field(default_factory=dict)
     
     def to_dict(self) -> Dict[str, Any]:
@@ -85,115 +77,153 @@ class GeneratedAnswer:
             "concepts_covered": self.concepts_covered,
             "confidence": self.confidence,
             "tokens_used": self.tokens_used,
-            "style_used": self.style_used.value,
+            "learning_mode": self.learning_mode.value,
             "metadata": self.metadata,
         }
 
 
 # ==========================================
-# System Prompts
+# Prompts por Modo Pedagógico
 # ==========================================
 
-SYSTEM_PROMPTS = {
+LEARNING_MODE_PROMPTS = {
     "es": {
-        ResponseStyle.CONCISE: """Eres un asistente educativo que SOLO responde usando la información del contexto proporcionado.
+        LearningMode.CONCEPT: """Eres un tutor educativo especializado en EXPLICAR CONCEPTOS Y TEORÍA.
+
+MODO: CONCEPTO - Tu objetivo es explicar definiciones, teoría y relaciones entre conceptos.
 
 REGLAS ESTRICTAS:
-- ÚNICAMENTE usa información del contexto dado
-- NO uses conocimiento externo ni inventes información
-- Si el contexto NO contiene la información necesaria, responde: "No tengo información suficiente en los documentos para responder esta pregunta."
-- Sé breve y directo
-- Cita las fuentes [1], [2], etc. cuando uses información del contexto""",
+1. SOLO usa información del contexto proporcionado
+2. NO uses conocimiento externo ni inventes información
+3. Explica DEFINICIONES de forma clara y precisa
+4. Describe RELACIONES entre conceptos cuando existan en el contexto
+5. Menciona PRERREQUISITOS si están disponibles
+6. Si falta información, indica: "No tengo información suficiente sobre este concepto en los documentos."
+7. Cita las fuentes [1], [2], etc.
 
-        ResponseStyle.DETAILED: """Eres un asistente educativo que SOLO responde usando la información del contexto proporcionado.
+ESTRUCTURA DE RESPUESTA:
+- Definición principal
+- Características clave
+- Relaciones con otros conceptos (si aplica)
+- Ejemplos del contexto (si existen)""",
 
-REGLAS ESTRICTAS:
-- ÚNICAMENTE usa información del contexto dado (documentos, grafos de conocimiento)
-- NO uses conocimiento externo, pre-entrenado ni inventes información
-- Si el contexto NO contiene la información necesaria, responde: "No tengo información suficiente en los documentos para responder esta pregunta. Te sugiero subir documentos relacionados con este tema."
-- Explica los conceptos de forma clara y estructurada
-- Cita las fuentes [1], [2], etc. cuando uses información
-- Si hay relaciones entre conceptos en el contexto, explícalas
-- NO supongas ni completes información que no esté explícita""",
+        LearningMode.PRACTICE: """Eres un tutor educativo especializado en RESOLVER EJERCICIOS PASO A PASO.
 
-        ResponseStyle.STEP_BY_STEP: """Eres un tutor educativo que SOLO responde usando la información del contexto proporcionado.
-
-REGLAS ESTRICTAS:
-- ÚNICAMENTE usa información del contexto dado
-- NO uses conocimiento externo ni inventes información
-- Si el contexto NO contiene la información necesaria, indícalo claramente
-- Descompón el problema en pasos claros basándote SOLO en el contexto
-- Numera cada paso
-- Cita las fuentes [1], [2], etc.
-- Si falta información para algún paso, dilo explícitamente""",
-
-        ResponseStyle.SOCRATIC: """Eres un tutor que usa el método socrático, pero SOLO con información del contexto proporcionado.
+MODO: PRÁCTICA - Tu objetivo es explicar la resolución de ejercicios de forma detallada.
 
 REGLAS ESTRICTAS:
-- ÚNICAMENTE usa información del contexto dado
-- NO uses conocimiento externo ni inventes información
-- Guía al estudiante con preguntas basadas SOLO en el contexto disponible
-- Si el contexto no tiene información suficiente, indícalo
-- Las preguntas deben poder responderse con el contexto dado""",
+1. SOLO usa información y métodos del contexto proporcionado
+2. NO inventes procedimientos ni uses conocimiento externo
+3. Explica CADA PASO de la solución claramente
+4. Justifica POR QUÉ se realiza cada paso
+5. Muestra el RESULTADO FINAL claramente
+6. Si el contexto no tiene suficiente información para resolver, indícalo
+7. Cita las fuentes [1], [2], etc.
 
-        ResponseStyle.EXAMPLE_BASED: """Eres un educador que enseña mediante ejemplos, usando SOLO el contexto proporcionado.
+ESTRUCTURA DE RESPUESTA:
+- Identificación del problema
+- Datos e incógnitas
+- Pasos de resolución (numerados)
+- Resultado final
+- Verificación (si aplica)""",
 
-REGLAS ESTRICTAS:
-- ÚNICAMENTE usa información y ejemplos del contexto dado
-- NO uses conocimiento externo ni inventes ejemplos
-- Si el contexto NO contiene ejemplos o información suficiente, indícalo
-- Cita las fuentes [1], [2], etc.
-- NO crees ejemplos ficticios - solo usa los del contexto""",
+        LearningMode.EXERCISE_LIST: """Eres un asistente que LISTA EJERCICIOS disponibles.
+
+MODO: LISTA DE EJERCICIOS - Tu objetivo es SOLO enumerar ejercicios, SIN explicarlos.
+
+REGLAS CRÍTICAS:
+1. SOLO lista ejercicios que existan en el contexto
+2. NO EXPLIQUES ni resuelvas los ejercicios
+3. NO INVENTES ejercicios que no estén en los documentos
+4. Para cada ejercicio incluye SOLO:
+   - Nombre/Título
+   - Dificultad (si está disponible)
+   - Concepto relacionado
+   - ID de referencia
+
+FORMATO OBLIGATORIO:
+📝 **[Título del Ejercicio]**
+   - Dificultad: [nivel]
+   - Concepto: [concepto relacionado]
+   - Ref: [id]
+
+Si NO hay ejercicios en el contexto, responde:
+"No encontré ejercicios en los documentos cargados. Te sugiero subir material con ejercicios prácticos."
+
+PROHIBIDO:
+❌ Explicar cómo resolver
+❌ Dar pistas o pasos
+❌ Inventar ejercicios
+❌ Resumir contenido""",
     },
     "en": {
-        ResponseStyle.CONCISE: """You are an educational assistant that ONLY responds using information from the provided context.
+        LearningMode.CONCEPT: """You are an educational tutor specialized in EXPLAINING CONCEPTS AND THEORY.
+
+MODE: CONCEPT - Your goal is to explain definitions, theory, and relationships between concepts.
 
 STRICT RULES:
-- ONLY use information from the given context
-- DO NOT use external knowledge or invent information
-- If the context does NOT contain the necessary information, respond: "I don't have enough information in the documents to answer this question."
-- Be brief and direct
-- Cite sources [1], [2], etc. when using context information""",
+1. ONLY use information from the provided context
+2. DO NOT use external knowledge or invent information
+3. Explain DEFINITIONS clearly and precisely
+4. Describe RELATIONSHIPS between concepts when they exist in context
+5. Mention PREREQUISITES if available
+6. If information is missing, indicate: "I don't have enough information about this concept in the documents."
+7. Cite sources [1], [2], etc.
 
-        ResponseStyle.DETAILED: """You are an educational assistant that ONLY responds using information from the provided context.
+RESPONSE STRUCTURE:
+- Main definition
+- Key characteristics
+- Relationships with other concepts (if applicable)
+- Examples from context (if they exist)""",
 
-STRICT RULES:
-- ONLY use information from the given context (documents, knowledge graphs)
-- DO NOT use external, pre-trained knowledge or invent information
-- If the context does NOT contain the necessary information, respond: "I don't have enough information in the documents to answer this question. I suggest uploading related documents."
-- Explain concepts clearly and in a structured manner
-- Cite sources [1], [2], etc. when using information
-- If there are relationships between concepts in the context, explain them
-- DO NOT assume or complete information that is not explicit""",
+        LearningMode.PRACTICE: """You are an educational tutor specialized in SOLVING EXERCISES STEP BY STEP.
 
-        ResponseStyle.STEP_BY_STEP: """You are an educational tutor that ONLY responds using information from the provided context.
-
-STRICT RULES:
-- ONLY use information from the given context
-- DO NOT use external knowledge or invent information
-- If the context does NOT contain the necessary information, clearly indicate it
-- Break down the problem into clear steps based ONLY on the context
-- Number each step
-- Cite sources [1], [2], etc.
-- If information is missing for any step, say so explicitly""",
-
-        ResponseStyle.SOCRATIC: """You are a tutor using the Socratic method, but ONLY with information from the provided context.
+MODE: PRACTICE - Your goal is to explain exercise solutions in detail.
 
 STRICT RULES:
-- ONLY use information from the given context
-- DO NOT use external knowledge or invent information
-- Guide the student with questions based ONLY on available context
-- If the context lacks sufficient information, indicate it
-- Questions must be answerable with the given context""",
+1. ONLY use information and methods from the provided context
+2. DO NOT invent procedures or use external knowledge
+3. Explain EACH STEP of the solution clearly
+4. Justify WHY each step is performed
+5. Show the FINAL RESULT clearly
+6. If context lacks sufficient information to solve, indicate it
+7. Cite sources [1], [2], etc.
 
-        ResponseStyle.EXAMPLE_BASED: """You are an educator who teaches through examples, using ONLY the provided context.
+RESPONSE STRUCTURE:
+- Problem identification
+- Data and unknowns
+- Resolution steps (numbered)
+- Final result
+- Verification (if applicable)""",
 
-STRICT RULES:
-- ONLY use information and examples from the given context
-- DO NOT use external knowledge or invent examples
-- If the context does NOT contain examples or sufficient information, indicate it
-- Cite sources [1], [2], etc.
-- DO NOT create fictional examples - only use those from the context""",
+        LearningMode.EXERCISE_LIST: """You are an assistant that LISTS available exercises.
+
+MODE: EXERCISE LIST - Your goal is to ONLY enumerate exercises, WITHOUT explaining them.
+
+CRITICAL RULES:
+1. ONLY list exercises that exist in the context
+2. DO NOT EXPLAIN or solve exercises
+3. DO NOT INVENT exercises that are not in the documents
+4. For each exercise include ONLY:
+   - Name/Title
+   - Difficulty (if available)
+   - Related concept
+   - Reference ID
+
+MANDATORY FORMAT:
+📝 **[Exercise Title]**
+   - Difficulty: [level]
+   - Concept: [related concept]
+   - Ref: [id]
+
+If there are NO exercises in the context, respond:
+"I didn't find exercises in the loaded documents. I suggest uploading material with practical exercises."
+
+FORBIDDEN:
+❌ Explaining how to solve
+❌ Giving hints or steps
+❌ Inventing exercises
+❌ Summarizing content""",
     }
 }
 
@@ -207,6 +237,7 @@ async def build_prompt(
     context_chunks: List[RankedResult],
     session_id: Optional[str] = None,
     config: Optional[PromptConfig] = None,
+    mode: LearningMode = LearningMode.CONCEPT,
 ) -> str:
     """
     Construye prompt completo con contexto recuperado.
@@ -216,6 +247,7 @@ async def build_prompt(
         context_chunks: Chunks de contexto recuperados
         session_id: ID de sesión para historial
         config: Configuración del prompt
+        mode: Modo de aprendizaje pedagógico
         
     Returns:
         Prompt construido
@@ -224,13 +256,17 @@ async def build_prompt(
     
     parts: List[str] = []
     
-    # 1. Contexto recuperado
+    # 1. Contexto recuperado (formateo diferente según modo)
     if context_chunks:
-        context_text = _format_context(context_chunks, config.max_context_tokens)
-        parts.append(f"### Contexto Relevante:\n{context_text}")
+        if mode == LearningMode.EXERCISE_LIST:
+            context_text = _format_exercise_list_context(context_chunks)
+            parts.append(f"### Ejercicios Disponibles:\n{context_text}")
+        else:
+            context_text = _format_context(context_chunks, config.max_context_tokens)
+            parts.append(f"### Contexto Relevante:\n{context_text}")
     
-    # 2. Historial de conversación
-    if session_id:
+    # 2. Historial de conversación (menos relevante para EXERCISE_LIST)
+    if session_id and mode != LearningMode.EXERCISE_LIST:
         conversation = await get_context_for_llm(
             session_id, 
             max_tokens=config.max_conversation_tokens
@@ -243,8 +279,12 @@ async def build_prompt(
     # 3. Pregunta actual
     parts.append(f"### Pregunta del Estudiante:\n{query}")
     
-    # 4. Instrucciones adicionales
-    if config.include_sources:
+    # 4. Instrucciones adicionales según modo
+    if mode == LearningMode.EXERCISE_LIST:
+        parts.append("\n(Lista SOLO los ejercicios encontrados. NO expliques ni resuelvas.)")
+    elif mode == LearningMode.PRACTICE:
+        parts.append("\n(Explica la resolución paso a paso. Cita las fuentes.)")
+    elif config.include_sources:
         parts.append("\n(Menciona las fuentes relevantes en tu respuesta)")
     
     return "\n\n".join(parts)
@@ -272,6 +312,39 @@ def _format_context(
         
         formatted_parts.append(chunk_text)
         current_tokens += chunk_tokens
+    
+    return "\n\n".join(formatted_parts)
+
+
+def _format_exercise_list_context(chunks: List[RankedResult]) -> str:
+    """
+    Formatea chunks para modo EXERCISE_LIST.
+    Solo incluye metadatos de ejercicios, sin contenido explicativo.
+    """
+    formatted_parts: List[str] = []
+    
+    for i, chunk in enumerate(chunks, 1):
+        metadata = chunk.metadata or {}
+        
+        # Extraer información del ejercicio
+        title = metadata.get("title", metadata.get("name", f"Ejercicio {i}"))
+        difficulty = metadata.get("difficulty", metadata.get("nivel", "no especificado"))
+        concepts = ", ".join(chunk.concepts) if chunk.concepts else metadata.get("concept", "general")
+        ref_id = chunk.id or metadata.get("source_id", f"ref_{i}")
+        exercise_type = metadata.get("type", metadata.get("chunk_type", "ejercicio"))
+        
+        # Formato estructurado para el LLM
+        exercise_info = f"""[{i}] EJERCICIO:
+- Título: {title}
+- Dificultad: {difficulty}
+- Concepto: {concepts}
+- Tipo: {exercise_type}
+- Referencia: {ref_id}"""
+        
+        formatted_parts.append(exercise_info)
+    
+    if not formatted_parts:
+        return "No se encontraron ejercicios en el contexto."
     
     return "\n\n".join(formatted_parts)
 
@@ -308,6 +381,7 @@ async def generate_answer(
     user_google_key: Optional[str] = None,
     preferred_provider: Optional[str] = None,
     user_model: Optional[str] = None,
+    mode: LearningMode = LearningMode.CONCEPT,
 ) -> GeneratedAnswer:
     """
     Genera respuesta final usando el LLM.
@@ -322,33 +396,41 @@ async def generate_answer(
         user_google_key: API key de Google del usuario (opcional)
         preferred_provider: Proveedor preferido ('openai' o 'google')
         user_model: Modelo específico a usar (ej: 'gpt-4', 'gemini-pro')
+        mode: Modo de aprendizaje pedagógico
         
     Returns:
         GeneratedAnswer con la respuesta
     """
     config = config or PromptConfig()
     
-    # Adaptar según perfil del estudiante
-    if student_id:
+    # Adaptar según perfil del estudiante (no para EXERCISE_LIST)
+    if student_id and mode != LearningMode.EXERCISE_LIST:
         config = await adapt_to_student(student_id, config)
     
-    # Construir prompt
+    # Construir prompt con modo
     prompt = await build_prompt(
         query=query,
         context_chunks=context_chunks,
         session_id=session_id,
         config=config,
+        mode=mode,
     )
     
-    # Obtener system prompt según estilo
-    lang = config.language if config.language in SYSTEM_PROMPTS else "es"
-    system_prompt = SYSTEM_PROMPTS[lang].get(
-        config.style, 
-        SYSTEM_PROMPTS[lang][ResponseStyle.DETAILED]
+    # Obtener system prompt por modo pedagógico
+    lang = config.language if config.language in LEARNING_MODE_PROMPTS else "es"
+    
+    # Usar prompt de modo pedagógico (siempre disponible para cada modo)
+    system_prompt = LEARNING_MODE_PROMPTS.get(lang, LEARNING_MODE_PROMPTS["es"]).get(
+        mode,
+        LEARNING_MODE_PROMPTS["es"][LearningMode.CONCEPT]  # Fallback a CONCEPT
     )
     
     # Generar respuesta (siempre usar generate_with_user_keys para lógica unificada)
     try:
+        # Ajustar temperatura según modo
+        temperature = 0.3 if mode == LearningMode.EXERCISE_LIST else 0.7
+        max_tokens = 1024 if mode == LearningMode.EXERCISE_LIST else 2048
+        
         answer_text = await generate_with_user_keys(
             prompt=prompt,
             system_prompt=system_prompt,
@@ -356,16 +438,16 @@ async def generate_answer(
             user_google_key=user_google_key,
             preferred_provider=preferred_provider,
             user_model=user_model,
-            temperature=0.7,
-            max_tokens=2048,
+            temperature=temperature,
+            max_tokens=max_tokens,
         )
         
         # Extraer fuentes y conceptos
         sources = [chunk.id for chunk in context_chunks[:5]]
         concepts = _extract_concepts_from_chunks(context_chunks)
         
-        # Calcular confianza basada en contexto
-        confidence = _calculate_confidence(context_chunks, answer_text)
+        # Calcular confianza basada en contexto y modo
+        confidence = _calculate_confidence(context_chunks, answer_text, mode)
         
         return GeneratedAnswer(
             answer=clean_whitespace(answer_text),
@@ -373,10 +455,11 @@ async def generate_answer(
             concepts_covered=concepts,
             confidence=confidence,
             tokens_used=token_count(prompt) + token_count(answer_text),
-            style_used=config.style,
+            learning_mode=mode,
             metadata={
                 "context_chunks": len(context_chunks),
                 "language": config.language,
+                "learning_mode": mode.value,
             },
         )
         
@@ -384,6 +467,7 @@ async def generate_answer(
         return GeneratedAnswer(
             answer=f"Lo siento, hubo un error generando la respuesta: {str(e)}",
             confidence=0.0,
+            learning_mode=mode,
             metadata={"error": str(e)},
         )
 
@@ -394,6 +478,7 @@ async def generate_answer_stream(
     session_id: Optional[str] = None,
     student_id: Optional[str] = None,
     config: Optional[PromptConfig] = None,
+    mode: LearningMode = LearningMode.CONCEPT,
 ) -> AsyncGenerator[str, None]:
     """
     Genera respuesta en streaming.
@@ -404,13 +489,14 @@ async def generate_answer_stream(
         session_id: ID de sesión
         student_id: ID del estudiante
         config: Configuración
+        mode: Modo de aprendizaje pedagógico
         
     Yields:
         Chunks de texto de la respuesta
     """
     config = config or PromptConfig()
     
-    if student_id:
+    if student_id and mode != LearningMode.EXERCISE_LIST:
         config = await adapt_to_student(student_id, config)
     
     prompt = await build_prompt(
@@ -418,12 +504,15 @@ async def generate_answer_stream(
         context_chunks=context_chunks,
         session_id=session_id,
         config=config,
+        mode=mode,
     )
     
-    lang = config.language if config.language in SYSTEM_PROMPTS else "es"
-    system_prompt = SYSTEM_PROMPTS[lang].get(
-        config.style,
-        SYSTEM_PROMPTS[lang][ResponseStyle.DETAILED]
+    # Obtener system prompt por modo pedagógico
+    lang = config.language if config.language in LEARNING_MODE_PROMPTS else "es"
+    
+    system_prompt = LEARNING_MODE_PROMPTS.get(lang, LEARNING_MODE_PROMPTS["es"]).get(
+        mode,
+        LEARNING_MODE_PROMPTS["es"][LearningMode.CONCEPT]
     )
     
     async for chunk in generate_stream(prompt, system_prompt):
@@ -456,36 +545,24 @@ async def adapt_to_student(
     # Obtener config según nivel
     level_config = get_level_config(profile.level)
     
-    # Ajustar estilo según nivel
+    # Ajustar configuración según nivel de competencia
     if profile.level == ProficiencyLevel.BEGINNER:
-        config.style = ResponseStyle.STEP_BY_STEP
         config.include_examples = True
         config.max_context_tokens = 2000  # Menos contexto, más explicación
         
     elif profile.level == ProficiencyLevel.ELEMENTARY:
-        config.style = ResponseStyle.EXAMPLE_BASED
         config.include_examples = True
         
     elif profile.level == ProficiencyLevel.INTERMEDIATE:
-        config.style = ResponseStyle.DETAILED
         config.include_examples = True
         
     elif profile.level == ProficiencyLevel.ADVANCED:
-        config.style = ResponseStyle.DETAILED
         config.include_examples = False
         config.max_context_tokens = 4000  # Más contexto
         
     elif profile.level == ProficiencyLevel.EXPERT:
-        config.style = ResponseStyle.CONCISE
         config.include_examples = False
         config.max_context_tokens = 4000
-    
-    # Ajustar según estilo de aprendizaje
-    if profile.learning_style.value == "visual":
-        # Podríamos incluir instrucciones para diagramas
-        pass
-    elif profile.learning_style.value == "kinesthetic":
-        config.style = ResponseStyle.STEP_BY_STEP
     
     return config
 
@@ -530,6 +607,7 @@ def _extract_concepts_from_chunks(chunks: List[RankedResult]) -> List[str]:
 def _calculate_confidence(
     chunks: List[RankedResult],
     answer: str,
+    mode: LearningMode = LearningMode.CONCEPT,
 ) -> float:
     """
     Calcula confianza de la respuesta.
@@ -538,6 +616,7 @@ def _calculate_confidence(
     - Scores de los chunks
     - Cantidad de chunks usados
     - Longitud de la respuesta
+    - Alineación con el modo pedagógico
     """
     if not chunks:
         return 0.3
@@ -548,11 +627,31 @@ def _calculate_confidence(
     # Factor 2: Cantidad de chunks (más = mejor hasta cierto punto)
     chunk_factor = min(1.0, len(chunks) / 5)
     
-    # Factor 3: Respuesta no vacía
-    answer_factor = 0.9 if len(answer) > 100 else 0.5
+    # Factor 3: Respuesta no vacía (ajustado por modo)
+    if mode == LearningMode.EXERCISE_LIST:
+        # Para lista de ejercicios, respuestas más cortas son aceptables
+        answer_factor = 0.9 if len(answer) > 50 else 0.5
+    else:
+        answer_factor = 0.9 if len(answer) > 100 else 0.5
+    
+    # Factor 4: Alineación con modo
+    mode_factor = 1.0
+    if mode == LearningMode.EXERCISE_LIST:
+        # Verificar que no haya explicaciones largas
+        if "paso" in answer.lower() or "solución" in answer.lower():
+            mode_factor = 0.7  # Penalizar si explica en modo lista
+    elif mode == LearningMode.PRACTICE:
+        # Verificar que haya pasos
+        if "1." in answer or "paso" in answer.lower():
+            mode_factor = 1.1  # Bonus si tiene estructura de pasos
     
     # Combinar factores
-    confidence = (avg_chunk_score * 0.5 + chunk_factor * 0.3 + answer_factor * 0.2)
+    confidence = (
+        avg_chunk_score * 0.4 + 
+        chunk_factor * 0.25 + 
+        answer_factor * 0.2 +
+        (mode_factor - 1.0) * 0.15 + 0.15
+    )
     
     return min(1.0, max(0.0, confidence))
 

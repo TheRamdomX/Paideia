@@ -2,6 +2,7 @@
 reflection_agent.py
 Agente de Reflexión - Evalúa calidad de respuestas y decide acciones correctivas.
 Puede solicitar reintento, más contexto, o aplicar fallback.
+Soporta modos pedagógicos: CONCEPT, PRACTICE, EXERCISE_LIST.
 """
 
 from __future__ import annotations
@@ -10,6 +11,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
 
+from backend.agents.mode_router import LearningMode
 from backend.agents.reasoning_agent import GeneratedAnswer, PromptConfig
 from backend.retrieval.hybrid_ranker import RankedResult
 from backend.utils.text import token_count
@@ -26,6 +28,7 @@ class EvaluationDimension(str, Enum):
     COHERENCE = "coherence"       # ¿Es coherente y bien estructurada?
     ACCURACY = "accuracy"         # ¿Es precisa según el contexto?
     COMPLETENESS = "completeness" # ¿Está completa?
+    MODE_ALIGNMENT = "mode_alignment"  # ¿Está alineada con el modo pedagógico?
 
 
 class ReflectionDecision(str, Enum):
@@ -36,6 +39,7 @@ class ReflectionDecision(str, Enum):
     SIMPLIFY = "simplify"                # Simplificar respuesta
     EXPAND = "expand"                    # Expandir respuesta
     FALLBACK = "fallback"                # Usar respuesta de fallback
+    MODE_MISMATCH = "mode_mismatch"      # Desalineación con modo pedagógico
 
 
 @dataclass
@@ -63,6 +67,8 @@ class EvaluationResult:
     suggestions: List[str] = field(default_factory=list)
     decision: ReflectionDecision = ReflectionDecision.ACCEPT
     confidence: float = 0.0
+    learning_mode: LearningMode = LearningMode.CONCEPT
+    mode_alignment_score: float = 1.0
     
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -72,6 +78,8 @@ class EvaluationResult:
             "suggestions": self.suggestions,
             "decision": self.decision.value,
             "confidence": self.confidence,
+            "learning_mode": self.learning_mode.value,
+            "mode_alignment_score": self.mode_alignment_score,
         }
 
 
@@ -82,6 +90,7 @@ class RetryConfig:
     min_score_threshold: float = 0.5
     require_improvement: bool = True
     different_strategy: bool = True
+    mode_alignment_threshold: float = 0.5  # Umbral para MODE_MISMATCH
 
 
 # ==========================================
@@ -93,6 +102,7 @@ async def evaluate_answer(
     answer: GeneratedAnswer,
     context_chunks: List[RankedResult],
     previous_evaluation: Optional[EvaluationResult] = None,
+    mode: LearningMode = LearningMode.CONCEPT,
 ) -> EvaluationResult:
     """
     Evalúa la calidad de una respuesta generada.
@@ -102,6 +112,7 @@ async def evaluate_answer(
         answer: Respuesta generada
         context_chunks: Contexto usado
         previous_evaluation: Evaluación anterior (si es reintento)
+        mode: Modo de aprendizaje pedagógico
         
     Returns:
         Resultado de evaluación
@@ -134,31 +145,58 @@ async def evaluate_answer(
         suggestions.append("Mejorar organización y flujo de la respuesta")
     
     # 4. Completitud - ¿Es suficientemente completa?
-    completeness = await _evaluate_completeness(query, answer.answer)
+    completeness = await _evaluate_completeness(query, answer.answer, mode)
     dimension_scores.append(completeness)
     if completeness.score < 0.5:
         issues.append("La respuesta parece incompleta")
         suggestions.append("Expandir para cubrir más aspectos")
     
+    # 5. NUEVA DIMENSIÓN: Alineación con modo pedagógico
+    mode_alignment = await _evaluate_mode_alignment(answer.answer, mode, context_chunks)
+    dimension_scores.append(mode_alignment)
+    if mode_alignment.score < 0.5:
+        issues.append(f"La respuesta no está alineada con el modo {mode.value}")
+        suggestions.append(f"Ajustar respuesta para modo {mode.value}")
+    
     # Calcular score general (promedio ponderado)
-    weights = {
-        EvaluationDimension.RELEVANCE: 0.35,
-        EvaluationDimension.COVERAGE: 0.25,
-        EvaluationDimension.COHERENCE: 0.20,
-        EvaluationDimension.COMPLETENESS: 0.20,
-    }
+    # Ajustar pesos según modo
+    if mode == LearningMode.EXERCISE_LIST:
+        weights = {
+            EvaluationDimension.RELEVANCE: 0.20,
+            EvaluationDimension.COVERAGE: 0.15,
+            EvaluationDimension.COHERENCE: 0.15,
+            EvaluationDimension.COMPLETENESS: 0.10,
+            EvaluationDimension.MODE_ALIGNMENT: 0.40,  # Muy importante para EXERCISE_LIST
+        }
+    elif mode == LearningMode.PRACTICE:
+        weights = {
+            EvaluationDimension.RELEVANCE: 0.25,
+            EvaluationDimension.COVERAGE: 0.20,
+            EvaluationDimension.COHERENCE: 0.20,
+            EvaluationDimension.COMPLETENESS: 0.15,
+            EvaluationDimension.MODE_ALIGNMENT: 0.20,
+        }
+    else:  # CONCEPT
+        weights = {
+            EvaluationDimension.RELEVANCE: 0.30,
+            EvaluationDimension.COVERAGE: 0.25,
+            EvaluationDimension.COHERENCE: 0.15,
+            EvaluationDimension.COMPLETENESS: 0.15,
+            EvaluationDimension.MODE_ALIGNMENT: 0.15,
+        }
     
     overall_score = sum(
-        ds.score * weights.get(ds.dimension, 0.25)
+        ds.score * weights.get(ds.dimension, 0.15)
         for ds in dimension_scores
     )
     
-    # Determinar decisión
+    # Determinar decisión (incluyendo modo)
     decision = _determine_decision(
         overall_score=overall_score,
         dimension_scores=dimension_scores,
         issues=issues,
         previous_evaluation=previous_evaluation,
+        mode=mode,
     )
     
     return EvaluationResult(
@@ -168,6 +206,8 @@ async def evaluate_answer(
         suggestions=suggestions,
         decision=decision,
         confidence=answer.confidence,
+        learning_mode=mode,
+        mode_alignment_score=mode_alignment.score,
     )
 
 
@@ -306,29 +346,36 @@ async def _evaluate_coherence(answer: str) -> DimensionScore:
 async def _evaluate_completeness(
     query: str,
     answer: str,
+    mode: LearningMode = LearningMode.CONCEPT,
 ) -> DimensionScore:
-    """Evalúa completitud de la respuesta."""
-    # Detectar tipo de pregunta
+    """Evalúa completitud de la respuesta según el modo."""
     query_lower = query.lower()
-    
-    # Preguntas de comparación necesitan más contenido
-    if any(w in query_lower for w in ["comparar", "diferencia", "vs", "versus"]):
-        min_length = 200
-        expected_structure = ["por un lado", "por otro", "mientras que", "en cambio"]
-    # Preguntas de explicación
-    elif any(w in query_lower for w in ["explicar", "explica", "cómo", "por qué"]):
-        min_length = 150
-        expected_structure = ["porque", "debido", "por lo tanto", "esto significa"]
-    # Preguntas de definición
-    elif any(w in query_lower for w in ["qué es", "qué son", "definir", "define"]):
-        min_length = 80
-        expected_structure = ["es", "se refiere", "significa", "se define"]
-    else:
-        min_length = 100
-        expected_structure = []
-    
     score = 1.0
     reasons: List[str] = []
+    
+    # Ajustar expectativas según modo pedagógico
+    if mode == LearningMode.EXERCISE_LIST:
+        # Para lista de ejercicios, no necesita ser larga
+        min_length = 30
+        expected_structure = ["ejercicio", "dificultad", "concepto"]
+    elif mode == LearningMode.PRACTICE:
+        # Para práctica, necesita pasos
+        min_length = 150
+        expected_structure = ["paso", "1.", "resultado", "solución"]
+    else:  # CONCEPT
+        # Detectar tipo de pregunta para CONCEPT
+        if any(w in query_lower for w in ["comparar", "diferencia", "vs", "versus"]):
+            min_length = 200
+            expected_structure = ["por un lado", "por otro", "mientras que", "en cambio"]
+        elif any(w in query_lower for w in ["explicar", "explica", "cómo", "por qué"]):
+            min_length = 150
+            expected_structure = ["porque", "debido", "por lo tanto", "esto significa"]
+        elif any(w in query_lower for w in ["qué es", "qué son", "definir", "define"]):
+            min_length = 80
+            expected_structure = ["es", "se refiere", "significa", "se define"]
+        else:
+            min_length = 100
+            expected_structure = []
     
     # Verificar longitud
     if len(answer) < min_length:
@@ -356,13 +403,109 @@ async def _evaluate_completeness(
     )
 
 
+async def _evaluate_mode_alignment(
+    answer: str,
+    mode: LearningMode,
+    context_chunks: List[RankedResult],
+) -> DimensionScore:
+    """
+    Evalúa si la respuesta está alineada con el modo pedagógico.
+    
+    CONCEPT: Debe tener definiciones y relaciones
+    PRACTICE: Debe tener pasos procedimentales y resultado
+    EXERCISE_LIST: NO debe tener explicaciones, solo lista
+    """
+    score = 1.0
+    reasons: List[str] = []
+    answer_lower = answer.lower()
+    
+    if mode == LearningMode.EXERCISE_LIST:
+        # CRÍTICO: No debe haber explicaciones
+        explanation_markers = [
+            "porque", "debido a", "por lo tanto", "esto significa",
+            "el primer paso", "para resolver", "la solución es",
+            "se calcula", "aplicamos", "utilizamos"
+        ]
+        
+        explanations_found = sum(1 for m in explanation_markers if m in answer_lower)
+        
+        if explanations_found > 2:
+            score -= 0.5
+            reasons.append(f"Contiene {explanations_found} explicaciones (prohibido)")
+        
+        # Debe tener estructura de lista
+        list_markers = ["ejercicio", "dificultad", "📝", "ref:", "concepto:"]
+        list_found = sum(1 for m in list_markers if m in answer_lower)
+        
+        if list_found < 2:
+            score -= 0.3
+            reasons.append("No tiene formato de lista de ejercicios")
+        
+        # Verificar que no sea muy larga (indica explicación)
+        if len(answer) > 1500:
+            score -= 0.2
+            reasons.append("Respuesta muy larga para lista")
+            
+    elif mode == LearningMode.PRACTICE:
+        # Debe tener pasos
+        step_markers = ["paso", "1.", "2.", "primero", "luego", "después", "finalmente"]
+        steps_found = sum(1 for m in step_markers if m in answer_lower)
+        
+        if steps_found < 2:
+            score -= 0.4
+            reasons.append("Faltan pasos procedimentales")
+        
+        # Debe tener resultado
+        result_markers = ["resultado", "respuesta", "solución", "=", "obtenemos"]
+        result_found = any(m in answer_lower for m in result_markers)
+        
+        if not result_found:
+            score -= 0.2
+            reasons.append("Falta resultado final")
+            
+    else:  # CONCEPT
+        # Debe tener definiciones o explicaciones conceptuales
+        concept_markers = ["es", "se define", "significa", "consiste en", "se refiere"]
+        concepts_found = sum(1 for m in concept_markers if m in answer_lower)
+        
+        if concepts_found < 1:
+            score -= 0.2
+            reasons.append("Falta definición o explicación conceptual")
+        
+        # Bonus si menciona relaciones
+        relation_markers = ["relaciona", "conecta", "depende", "implica", "causa"]
+        if any(m in answer_lower for m in relation_markers):
+            score = min(1.0, score + 0.1)
+            reasons.append("Incluye relaciones")
+    
+    score = max(0.0, min(1.0, score))
+    
+    return DimensionScore(
+        dimension=EvaluationDimension.MODE_ALIGNMENT,
+        score=score,
+        reason="; ".join(reasons) if reasons else f"Alineado con modo {mode.value}",
+    )
+
+
 def _determine_decision(
     overall_score: float,
     dimension_scores: List[DimensionScore],
     issues: List[str],
     previous_evaluation: Optional[EvaluationResult],
+    mode: LearningMode = LearningMode.CONCEPT,
 ) -> ReflectionDecision:
-    """Determina la decisión basada en la evaluación."""
+    """Determina la decisión basada en la evaluación y modo."""
+    
+    # Verificar MODE_ALIGNMENT primero
+    mode_alignment_score = next(
+        (ds.score for ds in dimension_scores 
+         if ds.dimension == EvaluationDimension.MODE_ALIGNMENT),
+        1.0
+    )
+    
+    # Si MODE_ALIGNMENT es muy bajo, es MODE_MISMATCH
+    if mode_alignment_score < 0.4:
+        return ReflectionDecision.MODE_MISMATCH
     
     # Si ya hubo evaluación previa y no mejoró, usar fallback
     if previous_evaluation:
@@ -381,6 +524,10 @@ def _determine_decision(
             if ds.score < 0.4
         ]
         
+        # Priorizar MODE_MISMATCH si el problema es de alineación
+        if any(ds.dimension == EvaluationDimension.MODE_ALIGNMENT for ds in low_dims):
+            return ReflectionDecision.MODE_MISMATCH
+        
         if any(ds.dimension == EvaluationDimension.COVERAGE for ds in low_dims):
             return ReflectionDecision.REQUEST_MORE_CONTEXT
         
@@ -388,14 +535,15 @@ def _determine_decision(
     
     # Score medio
     if overall_score < 0.7:
-        # Podría expandirse
-        completeness_score = next(
-            (ds.score for ds in dimension_scores 
-             if ds.dimension == EvaluationDimension.COMPLETENESS),
-            1.0
-        )
-        if completeness_score < 0.5:
-            return ReflectionDecision.EXPAND
+        # Podría expandirse (pero no para EXERCISE_LIST)
+        if mode != LearningMode.EXERCISE_LIST:
+            completeness_score = next(
+                (ds.score for ds in dimension_scores 
+                 if ds.dimension == EvaluationDimension.COMPLETENESS),
+                1.0
+            )
+            if completeness_score < 0.5:
+                return ReflectionDecision.EXPAND
         
         return ReflectionDecision.ACCEPT
     
@@ -436,6 +584,12 @@ async def decide_retry(
     if evaluation.decision == ReflectionDecision.FALLBACK:
         return False, "Usando fallback"
     
+    # MODE_MISMATCH requiere re-routing, no solo retry
+    if evaluation.decision == ReflectionDecision.MODE_MISMATCH:
+        if evaluation.mode_alignment_score < config.mode_alignment_threshold:
+            return True, f"Desalineación de modo ({evaluation.learning_mode.value}): requiere re-routing"
+        return True, "Mode mismatch detectado"
+    
     if evaluation.decision in [
         ReflectionDecision.RETRY, 
         ReflectionDecision.EXPAND,
@@ -457,39 +611,52 @@ async def decide_retry(
 def get_retry_adjustments(
     evaluation: EvaluationResult,
     current_config: PromptConfig,
-) -> PromptConfig:
+    mode: LearningMode = LearningMode.CONCEPT,
+) -> Tuple[PromptConfig, Dict[str, Any]]:
     """
     Obtiene ajustes para el reintento.
     
     Args:
         evaluation: Resultado de evaluación
         current_config: Configuración actual
+        mode: Modo de aprendizaje actual
         
     Returns:
-        Configuración ajustada
+        Tupla (configuración ajustada, ajustes de retrieval)
     """
-    from backend.agents.reasoning_agent import ResponseStyle
-    
     new_config = PromptConfig(
         max_context_tokens=current_config.max_context_tokens,
         max_conversation_tokens=current_config.max_conversation_tokens,
         include_examples=current_config.include_examples,
         include_sources=current_config.include_sources,
         language=current_config.language,
-        style=current_config.style,
     )
     
+    retrieval_adjustments: Dict[str, Any] = {
+        "change_strategy": False,
+        "force_mode": None,
+        "expand_graph": False,
+    }
+    
     # Ajustar según decisión
-    if evaluation.decision == ReflectionDecision.EXPAND:
+    if evaluation.decision == ReflectionDecision.MODE_MISMATCH:
+        # MODE_MISMATCH: forzar cambio de estrategia
+        retrieval_adjustments["change_strategy"] = True
+        retrieval_adjustments["force_mode"] = mode
+        
+        if mode == LearningMode.EXERCISE_LIST:
+            # Para EXERCISE_LIST, forzar solo grafo y expandir búsqueda
+            retrieval_adjustments["expand_graph"] = True
+            
+    elif evaluation.decision == ReflectionDecision.EXPAND:
         new_config.max_context_tokens = min(5000, current_config.max_context_tokens + 1000)
-        new_config.style = ResponseStyle.DETAILED
         
     elif evaluation.decision == ReflectionDecision.SIMPLIFY:
-        new_config.style = ResponseStyle.CONCISE
         new_config.include_examples = True
         
     elif evaluation.decision == ReflectionDecision.REQUEST_MORE_CONTEXT:
         new_config.max_context_tokens = min(6000, current_config.max_context_tokens + 2000)
+        retrieval_adjustments["expand_graph"] = True
     
     # Si cobertura es baja, pedir más ejemplos
     coverage_score = next(
@@ -500,7 +667,64 @@ def get_retry_adjustments(
     if coverage_score < 0.5:
         new_config.include_examples = True
     
-    return new_config
+    return new_config, retrieval_adjustments
+
+
+def get_mode_mismatch_corrections(
+    evaluation: EvaluationResult,
+    mode: LearningMode,
+) -> Dict[str, Any]:
+    """
+    Obtiene correcciones específicas para MODE_MISMATCH.
+    
+    Args:
+        evaluation: Resultado de evaluación
+        mode: Modo de aprendizaje objetivo
+        
+    Returns:
+        Diccionario con correcciones a aplicar
+    """
+    corrections: Dict[str, Any] = {
+        "reroute": True,
+        "retrieval_changes": {},
+        "prompt_changes": {},
+    }
+    
+    if mode == LearningMode.EXERCISE_LIST:
+        # Forzar retrieval solo de grafo para ejercicios
+        corrections["retrieval_changes"] = {
+            "mode": "graph_only",
+            "vector_weight": 0.0,
+            "bm25_weight": 0.0,
+            "graph_weight": 1.0,
+            "chunk_type_filter": "exercise",
+            "metadata_only": True,
+        }
+        corrections["prompt_changes"] = {
+            "instruction": "SOLO listar ejercicios. NO explicar.",
+        }
+        
+    elif mode == LearningMode.PRACTICE:
+        # Ajustar para ejemplos resueltos
+        corrections["retrieval_changes"] = {
+            "chunk_type_filter": "worked_example",
+            "expand_concepts": True,
+        }
+        corrections["prompt_changes"] = {
+            "instruction": "Explicar paso a paso. Incluir resultado final.",
+        }
+        
+    else:  # CONCEPT
+        # Priorizar definiciones y relaciones
+        corrections["retrieval_changes"] = {
+            "graph_weight": 0.5,
+            "expand_concepts": True,
+        }
+        corrections["prompt_changes"] = {
+            "instruction": "Explicar concepto con definiciones y relaciones.",
+        }
+    
+    return corrections
 
 
 # ==========================================

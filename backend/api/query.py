@@ -1,7 +1,7 @@
 """
 query.py
 Endpoint principal para consultas del estudiante.
-Orquesta retrieval + reasoning + reflection.
+Orquesta mode routing + retrieval + reasoning + reflection.
 """
 
 from __future__ import annotations
@@ -22,10 +22,15 @@ from fastapi import (
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+from backend.agents.mode_router import (
+    LearningMode,
+    detect_mode,
+    detect_mode_with_details,
+    get_mode_description,
+)
 from backend.agents.reasoning_agent import (
     GeneratedAnswer,
     PromptConfig,
-    ResponseStyle,
     build_prompt,
     generate_answer,
     generate_answer_stream,
@@ -38,6 +43,7 @@ from backend.agents.reflection_agent import (
     evaluate_answer,
     generate_fallback_response,
     get_retry_adjustments,
+    get_mode_mismatch_corrections,
 )
 from backend.agents.retrieval_agent import (
     RetrievalResult,
@@ -96,8 +102,12 @@ class QueryRequest(BaseModel):
     student_id: Optional[str] = None
     stream: bool = False
     use_cache: bool = True
-    style: Optional[ResponseStyle] = None
     max_context: Optional[int] = None
+    # Modo pedagógico explícito (opcional, auto-detectado si no se especifica)
+    learning_mode: Optional[str] = Field(
+        default=None,
+        description="Modo pedagógico: 'concept', 'practice', 'exercise_list'. Si se especifica, se usa directamente sin auto-detección."
+    )
 
 
 class QueryResponse(BaseModel):
@@ -109,6 +119,7 @@ class QueryResponse(BaseModel):
     session_id: str
     query_id: str
     strategy_used: str = ""
+    learning_mode: str = "concept"  # Nuevo: modo pedagógico usado
     cached: bool = False
     processing_time_ms: int = 0
     metadata: Dict[str, Any] = Field(default_factory=dict)
@@ -167,13 +178,14 @@ async def query_student(
     """
     Procesa una pregunta del estudiante.
     
-    Pipeline:
-    1. Verificar caché
-    2. Decidir estrategia de retrieval
-    3. Recuperar contexto
-    4. Generar respuesta
-    5. Evaluar y posiblemente reintentar
-    6. Guardar en sesión y caché
+    Pipeline con Modo Pedagógico:
+    1. Detectar/usar modo pedagógico (CONCEPT, PRACTICE, EXERCISE_LIST)
+    2. Verificar caché
+    3. Decidir estrategia de retrieval (mode-aware)
+    4. Recuperar contexto (mode-aware)
+    5. Generar respuesta (mode-aware)
+    6. Evaluar (mode-aware) y posiblemente reintentar/re-routing
+    7. Guardar en sesión y caché
     """
     start_time = time.time()
     query_id = str(uuid.uuid4())
@@ -188,9 +200,18 @@ async def query_student(
     
     await get_or_create_session(session_id, student_id)
     
-    # 1. Verificar caché
+    # 1. NUEVO: Detectar modo pedagógico
+    if request.learning_mode:
+        try:
+            learning_mode = LearningMode(request.learning_mode)
+        except ValueError:
+            learning_mode = await detect_mode(request.question)
+    else:
+        learning_mode = await detect_mode(request.question)
+    
+    # 2. Verificar caché (incluir modo en cache key)
     if request.use_cache:
-        cache_key = _get_cache_key(request.question, student_id)
+        cache_key = _get_cache_key(request.question, student_id) + f":{learning_mode.value}"
         if cache_key in _response_cache:
             cached = _response_cache[cache_key]
             cached.cached = True
@@ -198,40 +219,42 @@ async def query_student(
             cached.processing_time_ms = int((time.time() - start_time) * 1000)
             return cached
     
-    # 2. Decidir estrategia
+    # 3. Decidir estrategia (mode-aware)
     strategy_decision = await decide_strategy(
         query=request.question,
         student_id=student_id,
+        mode=learning_mode,
     )
     
-    # 3. Recuperar contexto
+    # 4. Recuperar contexto (mode-aware)
     retrieval_result = await retrieve(
         query=request.question,
         strategy=strategy_decision,
         student_id=student_id,
         openai_api_key=x_openai_key,
         google_api_key=x_google_key,
+        mode=learning_mode,
     )
     
-    # Re-score si hay student_id
+    # Re-score si hay student_id (mode-aware)
     if student_id:
         scored_results = await score_results(
             results=retrieval_result.results,
             query=request.question,
             student_id=student_id,
+            mode=learning_mode,
         )
     else:
         scored_results = retrieval_result.results
     
-    # 4. Configurar prompt
+    # 5. Configurar prompt
     prompt_config = PromptConfig(
         language="es",
-        style=request.style or ResponseStyle.DETAILED,
     )
     if request.max_context:
         prompt_config.max_context_tokens = request.max_context
     
-    # 5. Generar respuesta
+    # 6. Generar respuesta (mode-aware)
     try:
         answer = await generate_answer(
             query=request.question,
@@ -243,6 +266,7 @@ async def query_student(
             user_google_key=x_google_key,
             preferred_provider=x_preferred_provider,
             user_model=x_model,
+            mode=learning_mode,
         )
     except ValueError as e:
         # Errores de configuración (API key inválida, modelo no encontrado)
@@ -268,27 +292,54 @@ async def query_student(
                 detail=f"Error al generar respuesta: {str(e)[:200]}",
             )
     
-    # 6. Evaluar respuesta
+    # 7. Evaluar respuesta (mode-aware)
     evaluation = await evaluate_answer(
         query=request.question,
         answer=answer,
         context_chunks=scored_results,
+        mode=learning_mode,
     )
     
-    # 7. Reintentar si es necesario
+    # 8. Reintentar si es necesario (incluyendo MODE_MISMATCH)
     retries = 0
     max_retries = 2
     
     while evaluation.decision in [
         ReflectionDecision.RETRY,
         ReflectionDecision.REQUEST_MORE_CONTEXT,
+        ReflectionDecision.MODE_MISMATCH,
     ] and retries < max_retries:
         retries += 1
         
-        # Ajustar configuración
-        prompt_config = get_retry_adjustments(evaluation, prompt_config)
+        # Ajustar configuración y retrieval
+        prompt_config, retrieval_adjustments = get_retry_adjustments(
+            evaluation, prompt_config, learning_mode
+        )
         
-        # Regenerar
+        # Si es MODE_MISMATCH, aplicar correcciones específicas
+        if evaluation.decision == ReflectionDecision.MODE_MISMATCH:
+            corrections = get_mode_mismatch_corrections(evaluation, learning_mode)
+            
+            # Re-hacer retrieval con ajustes
+            if corrections.get("reroute") and corrections.get("retrieval_changes"):
+                # Actualizar estrategia con correcciones
+                strategy_decision = await decide_strategy(
+                    query=request.question,
+                    student_id=student_id,
+                    mode=learning_mode,
+                )
+                
+                retrieval_result = await retrieve(
+                    query=request.question,
+                    strategy=strategy_decision,
+                    student_id=student_id,
+                    openai_api_key=x_openai_key,
+                    google_api_key=x_google_key,
+                    mode=learning_mode,
+                )
+                scored_results = retrieval_result.results
+        
+        # Regenerar respuesta
         answer = await generate_answer(
             query=request.question,
             context_chunks=scored_results,
@@ -299,6 +350,7 @@ async def query_student(
             user_google_key=x_google_key,
             preferred_provider=x_preferred_provider,
             user_model=x_model,
+            mode=learning_mode,
         )
         
         # Re-evaluar
@@ -307,9 +359,10 @@ async def query_student(
             answer=answer,
             context_chunks=scored_results,
             previous_evaluation=evaluation,
+            mode=learning_mode,
         )
     
-    # 8. Fallback si aún falla
+    # 9. Fallback si aún falla
     if evaluation.decision == ReflectionDecision.FALLBACK:
         fallback_text = await generate_fallback_response(
             query=request.question,
@@ -319,7 +372,7 @@ async def query_student(
         answer.answer = fallback_text
         answer.confidence = 0.5
     
-    # 9. Guardar en sesión
+    # 10. Guardar en sesión
     await add_turn(
         session_id=session_id,
         role=TurnRole.USER,
@@ -329,10 +382,10 @@ async def query_student(
         session_id=session_id,
         role=TurnRole.ASSISTANT,
         content=answer.answer,
-        metadata={"concepts": answer.concepts_covered},
+        metadata={"concepts": answer.concepts_covered, "learning_mode": learning_mode.value},
     )
     
-    # 10. Construir respuesta
+    # 11. Construir respuesta
     processing_time = int((time.time() - start_time) * 1000)
     
     response = QueryResponse(
@@ -343,18 +396,20 @@ async def query_student(
         session_id=session_id,
         query_id=query_id,
         strategy_used=strategy_decision.strategy.value,
+        learning_mode=learning_mode.value,
         cached=False,
         processing_time_ms=processing_time,
         metadata={
-            "style": answer.style_used.value,
             "retries": retries,
             "evaluation_score": evaluation.overall_score,
+            "mode_alignment_score": evaluation.mode_alignment_score,
+            "mode_description": get_mode_description(learning_mode),
         },
     )
     
-    # 11. Guardar en caché
+    # 12. Guardar en caché
     if request.use_cache:
-        cache_key = _get_cache_key(request.question, student_id)
+        cache_key = _get_cache_key(request.question, student_id) + f":{learning_mode.value}"
         _response_cache[cache_key] = response
     
     return response
@@ -363,7 +418,7 @@ async def query_student(
 @router.post(
     "/stream",
     summary="Consulta con streaming",
-    description="Consulta con respuesta en streaming",
+    description="Consulta con respuesta en streaming (mode-aware)",
 )
 async def query_stream(
     request: QueryRequest,
@@ -377,31 +432,42 @@ async def query_stream(
 ) -> StreamingResponse:
     """
     Procesa consulta con respuesta en streaming.
+    Soporta modos pedagógicos.
     """
     session_id = request.session_id or x_session_id or str(uuid.uuid4())
     student_id = request.student_id or x_student_id
     
     await get_or_create_session(session_id, student_id)
     
-    # Decidir estrategia
+    # Detectar modo pedagógico
+    if request.learning_mode:
+        try:
+            learning_mode = LearningMode(request.learning_mode)
+        except ValueError:
+            learning_mode = await detect_mode(request.question)
+    else:
+        learning_mode = await detect_mode(request.question)
+    
+    # Decidir estrategia (mode-aware)
     strategy_decision = await decide_strategy(
         query=request.question,
         student_id=student_id,
+        mode=learning_mode,
     )
     
-    # Recuperar contexto
+    # Recuperar contexto (mode-aware)
     retrieval_result = await retrieve(
         query=request.question,
         strategy=strategy_decision,
-        session_id=session_id,
+        student_id=student_id,
         openai_api_key=x_openai_key,
         google_api_key=x_google_key,
+        mode=learning_mode,
     )
     
     # Configurar prompt
     prompt_config = PromptConfig(
         language="es",
-        style=request.style or ResponseStyle.DETAILED,
     )
     
     async def generate_stream():
@@ -414,13 +480,17 @@ async def query_stream(
             session_id=session_id,
             student_id=student_id,
             config=prompt_config,
+            mode=learning_mode,
         ):
             full_response += chunk
             yield f"data: {chunk}\n\n"
         
         # Guardar en sesión al final
         await add_turn(session_id, TurnRole.USER, request.question)
-        await add_turn(session_id, TurnRole.ASSISTANT, full_response)
+        await add_turn(
+            session_id, TurnRole.ASSISTANT, full_response,
+            metadata={"learning_mode": learning_mode.value}
+        )
         
         yield "data: [DONE]\n\n"
     
@@ -431,6 +501,7 @@ async def query_stream(
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
             "X-Session-Id": session_id,
+            "X-Learning-Mode": learning_mode.value,
         },
     )
 
@@ -496,7 +567,6 @@ async def query_debug(
     # Configuración
     prompt_config = PromptConfig(
         language="es",
-        style=request.style or ResponseStyle.DETAILED,
     )
     
     # Prompt

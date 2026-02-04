@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 from abc import ABC, abstractmethod
 from typing import List, Optional
+from google.genai import types
 
 from tenacity import retry, stop_after_attempt, wait_exponential
 
@@ -202,8 +203,6 @@ class GoogleEmbedding(BaseEmbedding):
         if not text or not text.strip():
             return [0.0] * self.dimension
         
-        from google.genai import types
-        
         loop = asyncio.get_event_loop()
         
         result = await loop.run_in_executor(
@@ -236,8 +235,6 @@ class GoogleEmbedding(BaseEmbedding):
         """
         if not texts:
             return []
-        
-        from google.genai import types
         
         results = []
         

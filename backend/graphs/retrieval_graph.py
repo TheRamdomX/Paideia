@@ -599,7 +599,7 @@ async def concept_search(
 
 async def build_context(
     query: str,
-    max_tokens: int = 4000,
+    max_tokens: int = 8000,
     mode: RetrievalMode = RetrievalMode.HYBRID,
 ) -> str:
     """
