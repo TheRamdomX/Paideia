@@ -223,6 +223,10 @@ async def _evaluate_coverage(
     chunks_used = 0
     
     for chunk in context_chunks[:5]:  # Evaluar top 5
+        # Verificar que el chunk tenga contenido válido
+        if not chunk.content:
+            continue
+            
         # Buscar frases del chunk en la respuesta
         chunk_words = set(chunk.content.lower().split()[:20])  # Primeras 20 palabras
         answer_words = set(answer_lower.split())
@@ -231,13 +235,14 @@ async def _evaluate_coverage(
         if overlap >= 3:  # Al menos 3 palabras en común
             chunks_used += 1
     
-    coverage_ratio = chunks_used / min(5, len(context_chunks))
+    coverage_ratio = chunks_used / min(5, len(context_chunks)) if context_chunks else 0.5
     
     # Bonus si menciona conceptos
     concept_bonus = 0
     all_concepts = []
     for chunk in context_chunks:
-        all_concepts.extend(chunk.concepts)
+        if chunk.concepts:
+            all_concepts.extend(chunk.concepts)
     
     if all_concepts:
         concepts_mentioned = sum(
@@ -577,24 +582,31 @@ async def generate_fallback_response(
     # Crear respuesta honesta sobre limitaciones
     response_parts: List[str] = []
     
-    response_parts.append(
-        "Basándome en la información disponible, puedo ofrecerte lo siguiente:"
-    )
-    
-    # Incluir información de los chunks disponibles
-    if context_chunks:
-        response_parts.append("\n**Información relevante encontrada:**\n")
+    if not context_chunks:
+        response_parts.append(
+            "**No encontré información relevante en los documentos del sistema.**\n\n"
+            "Para poder ayudarte con esta pregunta, necesitaría que subas documentos "
+            "relacionados con el tema. Puedes hacerlo usando el botón de adjuntar archivos."
+        )
+    else:
+        response_parts.append(
+            "**Información parcial encontrada en los documentos:**\n"
+        )
+        
+        # Incluir información de los chunks disponibles
         for i, chunk in enumerate(context_chunks[:3], 1):
+            # Verificar que el chunk tenga contenido
+            if not chunk.content:
+                continue
             # Extracto del chunk
             content = chunk.content[:300] + "..." if len(chunk.content) > 300 else chunk.content
-            response_parts.append(f"{i}. {content}\n")
-    
-    # Indicar limitaciones
-    if evaluation.issues:
-        response_parts.append("\n**Nota:** ")
+            response_parts.append(f"[{i}] {content}\n")
+        
         response_parts.append(
-            "La información disponible podría no cubrir completamente tu pregunta. "
-            "Te sugiero reformular la pregunta o consultar fuentes adicionales."
+            "\n**Nota:** Los documentos disponibles no contienen información suficiente "
+            "para responder completamente tu pregunta. Te sugiero:\n"
+            "- Subir más documentos relacionados con el tema\n"
+            "- Reformular la pregunta con términos más específicos"
         )
     
     return "\n".join(response_parts)

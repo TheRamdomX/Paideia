@@ -228,12 +228,24 @@ async def search_by_embedding(
             "limit": limit * 2,  # Obtener más para filtrar
         }
         
-        result = await db.query(surql, params)
+        result = await db.execute(surql, params)
+        
+        print(f"[VECTOR_SEARCH] Query result type: {type(result)}, len: {len(result) if result else 0}")
+        if result:
+            print(f"[VECTOR_SEARCH] result[0] type: {type(result[0])}")
         
         results = []
         
         if result and len(result) > 0:
-            rows = result[0].get("result", []) if isinstance(result[0], dict) else result
+            # El resultado puede ser una lista de dicts directamente o un dict con "result"
+            if isinstance(result[0], dict) and "result" in result[0]:
+                rows = result[0].get("result", [])
+            else:
+                rows = result  # Ya es la lista de resultados
+            
+            print(f"[VECTOR_SEARCH] Rows type: {type(rows)}, count: {len(rows) if hasattr(rows, '__len__') else 'N/A'}")
+            if rows and len(rows) > 0:
+                print(f"[VECTOR_SEARCH] First row sample: {list(rows[0].keys()) if isinstance(rows[0], dict) else rows[0]}")
             
             for row in rows:
                 if isinstance(row, dict):
@@ -248,9 +260,11 @@ async def search_by_embedding(
                             metadata=row.get("metadata", {}),
                         ))
         
+        print(f"[VECTOR_SEARCH] Found {len(results)} results with min_score >= {min_score}")
         return results[:limit]
         
-    except Exception:
+    except Exception as e:
+        print(f"[VECTOR_SEARCH] Error: {e}")
         # Fallback a cálculo manual
         return await _fallback_vector_search(
             embedding, table, embedding_field, limit, min_score

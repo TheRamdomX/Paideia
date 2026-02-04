@@ -159,7 +159,9 @@ async def embed_chunk(chunk: Chunk) -> VectorizedChunk:
 
 async def embed_chunks_batch(
     chunks: List[Chunk],
-    batch_size: int = 50
+    batch_size: int = 50,
+    user_openai_key: Optional[str] = None,
+    user_google_key: Optional[str] = None,
 ) -> List[VectorizedChunk]:
     """
     Genera embeddings para múltiples chunks en batch.
@@ -167,6 +169,8 @@ async def embed_chunks_batch(
     Args:
         chunks: Lista de chunks
         batch_size: Tamaño del batch
+        user_openai_key: API key de OpenAI del cliente
+        user_google_key: API key de Google del cliente
         
     Returns:
         Lista de VectorizedChunks
@@ -183,8 +187,12 @@ async def embed_chunks_batch(
         # Extraer contenidos
         contents = [c.content for c in batch]
         
-        # Obtener embeddings en batch
-        embeddings = await batch_embed(contents)
+        # Obtener embeddings en batch con las API keys del cliente
+        embeddings = await batch_embed(
+            contents,
+            user_openai_key=user_openai_key,
+            user_google_key=user_google_key,
+        )
         
         # Crear resultados
         for chunk, embedding in zip(batch, embeddings):

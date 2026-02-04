@@ -165,19 +165,20 @@ class OpenAIEmbedding(BaseEmbedding):
 class GoogleEmbedding(BaseEmbedding):
     """Implementación de embeddings usando Google."""
     
-    # Dimensión de text-embedding-004
-    EMBEDDING_DIMENSION = 768
+    # Dimensión compatible con OpenAI text-embedding-3-small
+    EMBEDDING_DIMENSION = 3072
     
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self._configured = False
+        self._client = None
     
-    def _configure(self):
-        """Configura la API de Google."""
-        if not self._configured:
-            import google.generativeai as genai
-            genai.configure(api_key=self.api_key)
-            self._configured = True
+    @property
+    def client(self):
+        """Lazy initialization del cliente Google."""
+        if self._client is None:
+            from google import genai
+            self._client = genai.Client(api_key=self.api_key)
+        return self._client
     
     @property
     def dimension(self) -> int:
@@ -201,21 +202,23 @@ class GoogleEmbedding(BaseEmbedding):
         if not text or not text.strip():
             return [0.0] * self.dimension
         
-        self._configure()
-        import google.generativeai as genai
+        from google.genai import types
         
         loop = asyncio.get_event_loop()
         
         result = await loop.run_in_executor(
             None,
-            lambda: genai.embed_content(
+            lambda: self.client.models.embed_content(
                 model=self.model,
-                content=text,
-                task_type="retrieval_document",
+                contents=text,
+                config=types.EmbedContentConfig(output_dimensionality=self.EMBEDDING_DIMENSION),
             )
         )
         
-        return result['embedding']
+        # La nueva API devuelve embeddings como lista de ContentEmbedding
+        if result.embeddings and len(result.embeddings) > 0:
+            return list(result.embeddings[0].values)
+        return [0.0] * self.dimension
     
     @retry(
         stop=stop_after_attempt(3),
@@ -224,7 +227,6 @@ class GoogleEmbedding(BaseEmbedding):
     async def batch_embed(self, texts: List[str]) -> List[List[float]]:
         """
         Genera embeddings para múltiples textos.
-        Google no tiene batch nativo, se hace secuencial.
         
         Args:
             texts: Lista de textos
@@ -235,8 +237,7 @@ class GoogleEmbedding(BaseEmbedding):
         if not texts:
             return []
         
-        self._configure()
-        import google.generativeai as genai
+        from google.genai import types
         
         results = []
         
@@ -249,14 +250,17 @@ class GoogleEmbedding(BaseEmbedding):
             
             result = await loop.run_in_executor(
                 None,
-                lambda t=text: genai.embed_content(
+                lambda t=text: self.client.models.embed_content(
                     model=self.model,
-                    content=t,
-                    task_type="retrieval_document",
+                    contents=t,
+                    config=types.EmbedContentConfig(output_dimensionality=self.EMBEDDING_DIMENSION),
                 )
             )
             
-            results.append(result['embedding'])
+            if result.embeddings and len(result.embeddings) > 0:
+                results.append(list(result.embeddings[0].values))
+            else:
+                results.append([0.0] * self.dimension)
         
         return results
 
@@ -316,31 +320,102 @@ def get_embedding_model() -> BaseEmbedding:
     return _embedding_instance
 
 
-async def embed_text(text: str) -> List[float]:
+def get_embedding_model_with_key(
+    user_openai_key: Optional[str] = None,
+    user_google_key: Optional[str] = None,
+) -> BaseEmbedding:
+    """
+    Obtiene modelo de embeddings con API keys del cliente.
+    
+    Si se proporciona una API key del cliente, se usa esa.
+    Si no, se usa la configuración del servidor.
+    
+    Args:
+        user_openai_key: API key de OpenAI del cliente
+        user_google_key: API key de Google del cliente
+        
+    Returns:
+        Instancia de modelo de embeddings
+    """
+    config = get_embedding_config()
+    provider = config["provider"]
+    model = config["model"]
+    
+    # Determinar qué API key usar
+    if provider == EmbeddingProvider.OPENAI:
+        api_key = user_openai_key or config["api_key"]
+        if not api_key or api_key.startswith("sk-your"):
+            # Si no hay key de OpenAI válida, intentar con Google
+            if user_google_key:
+                return GoogleEmbedding(
+                    model=get_settings().google_embedding_model,
+                    api_key=user_google_key,
+                )
+        if not api_key:
+            raise ValueError("No hay API key de OpenAI configurada")
+        return OpenAIEmbedding(model=model, api_key=api_key)
+    
+    elif provider == EmbeddingProvider.GOOGLE:
+        api_key = user_google_key or config["api_key"]
+        if not api_key or api_key == "your-google-api-key":
+            # Si no hay key de Google válida, intentar con OpenAI
+            if user_openai_key:
+                return OpenAIEmbedding(
+                    model=get_settings().openai_embedding_model,
+                    api_key=user_openai_key,
+                )
+        if not api_key:
+            raise ValueError("No hay API key de Google configurada")
+        return GoogleEmbedding(model=model, api_key=api_key)
+    
+    else:
+        raise ValueError(f"Proveedor no soportado: {provider}")
+
+
+async def embed_text(
+    text: str,
+    user_openai_key: Optional[str] = None,
+    user_google_key: Optional[str] = None,
+) -> List[float]:
     """
     Genera embedding para un texto.
     
     Args:
         text: Texto a embeder
+        user_openai_key: API key de OpenAI del cliente (opcional)
+        user_google_key: API key de Google del cliente (opcional)
         
     Returns:
         Vector de embedding
     """
-    model = get_embedding_model()
+    if user_openai_key or user_google_key:
+        model = get_embedding_model_with_key(user_openai_key, user_google_key)
+    else:
+        model = get_embedding_model()
     return await model.embed_text(text)
 
 
-async def batch_embed(texts: List[str]) -> List[List[float]]:
+async def batch_embed(
+    texts: List[str],
+    user_openai_key: Optional[str] = None,
+    user_google_key: Optional[str] = None,
+) -> List[List[float]]:
     """
     Genera embeddings para múltiples textos.
     
     Args:
         texts: Lista de textos
+        user_openai_key: API key de OpenAI del cliente (opcional)
+        user_google_key: API key de Google del cliente (opcional)
         
     Returns:
         Lista de vectores de embedding
     """
-    model = get_embedding_model()
+    if user_openai_key or user_google_key:
+        model = get_embedding_model_with_key(user_openai_key, user_google_key)
+    else:
+        model = get_embedding_model()
+    print(f"[EMBEDDING] Using model: {type(model).__name__}, dimension: {model.dimension}")
     return await model.batch_embed(texts)
 
 

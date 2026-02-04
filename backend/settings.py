@@ -50,9 +50,9 @@ class Settings(BaseSettings):
     
     # Google (Gemini/Gemma)
     google_api_key: Optional[str] = Field(default=None, description="API Key de Google AI")
-    google_model: str = Field(default="gemini-1.5-flash", description="Modelo de Google")
+    google_model: str = Field(default="gemma-3-27b-it", description="Modelo de Google")
     google_embedding_model: str = Field(
-        default="models/text-embedding-004",
+        default="gemini-embedding-001",
         description="Modelo de embeddings de Google"
     )
     
@@ -218,19 +218,19 @@ def get_model_config_with_user_keys(
         if preferred_provider and preferred_provider.lower() == "openai" and user_openai_key:
             provider = LLMProvider.OPENAI
             api_key = user_openai_key
-            default_model = "gpt-4o-mini"
+            default_model = "gpt-4.1-mini"
         elif preferred_provider and preferred_provider.lower() == "google" and user_google_key:
             provider = LLMProvider.GOOGLE
             api_key = user_google_key
-            default_model = "gemini-1.5-flash"
+            default_model = "gemma-3-27b-it"
         elif user_openai_key:
             provider = LLMProvider.OPENAI
             api_key = user_openai_key
-            default_model = "gpt-4o-mini"
+            default_model = "gpt-4.1-mini"
         elif user_google_key:
             provider = LLMProvider.GOOGLE
             api_key = user_google_key
-            default_model = "gemini-1.5-flash"
+            default_model = "gemma-3-27b-it"
         else:
             raise ValueError("Debe proporcionar una API key válida.")
         

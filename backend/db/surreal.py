@@ -144,7 +144,10 @@ class SurrealDBClient:
         
         try:
             if record_id:
-                result = await self._client.create(f"{table}:{record_id}", data)
+                # Escapar IDs con caracteres especiales usando backticks
+                escaped_id = f"`{record_id}`" if "-" in record_id else record_id
+                thing = f"{table}:{escaped_id}"
+                result = await self._client.create(thing, data)
             else:
                 result = await self._client.create(table, data)
             
@@ -173,7 +176,9 @@ class SurrealDBClient:
         
         try:
             if record_id:
-                result = await self._client.select(f"{table}:{record_id}")
+                # Escapar IDs con caracteres especiales usando backticks
+                escaped_id = f"`{record_id}`" if "-" in record_id else record_id
+                result = await self._client.select(f"{table}:{escaped_id}")
             else:
                 result = await self._client.select(table)
             
@@ -191,7 +196,7 @@ class SurrealDBClient:
         data: Dict[str, Any]
     ) -> Dict[str, Any]:
         """
-        Actualiza un registro.
+        Actualiza un registro (merge parcial).
         
         Args:
             table: Nombre de la tabla
@@ -205,7 +210,10 @@ class SurrealDBClient:
             await self.connect()
         
         try:
-            result = await self._client.update(f"{table}:{record_id}", data)
+            # Escapar IDs con caracteres especiales usando backticks
+            escaped_id = f"`{record_id}`" if "-" in record_id else record_id
+            # Usar merge en lugar de update para preservar campos existentes
+            result = await self._client.merge(f"{table}:{escaped_id}", data)
             return result if isinstance(result, dict) else result[0] if result else {}
             
         except Exception as e:
@@ -231,7 +239,9 @@ class SurrealDBClient:
         
         try:
             if record_id:
-                await self._client.delete(f"{table}:{record_id}")
+                # Escapar IDs con caracteres especiales usando backticks
+                escaped_id = f"`{record_id}`" if "-" in record_id else record_id
+                await self._client.delete(f"{table}:{escaped_id}")
             else:
                 await self._client.delete(table)
             return True

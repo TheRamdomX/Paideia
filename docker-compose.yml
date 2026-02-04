@@ -53,6 +53,22 @@ services:
     networks:
       - paideia-network
 
+  # ==========================================
+  # Frontend - Nginx
+  # ==========================================
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: paideia-frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+    networks:
+      - paideia-network
+
 # ==========================================
 # Red
 # ==========================================

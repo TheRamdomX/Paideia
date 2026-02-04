@@ -8,6 +8,7 @@ Dispara el source_graph para procesamiento.
 from __future__ import annotations
 
 import asyncio
+import logging
 import uuid
 from datetime import datetime
 from enum import Enum
@@ -19,6 +20,7 @@ from fastapi import (
     Depends,
     File,
     Form,
+    Header,
     HTTPException,
     Query,
     UploadFile,
@@ -28,6 +30,8 @@ from pydantic import BaseModel, Field, HttpUrl
 
 from backend.deps import get_db, get_agents, AgentContainer
 from backend.graphs.source_graph import run_source_graph
+
+logger = logging.getLogger(__name__)
 
 
 # ==========================================
@@ -238,12 +242,17 @@ async def _process_ingest_file(
     file_path: str,
     title: str,
     metadata: Dict[str, Any],
+    user_openai_key: Optional[str] = None,
+    user_google_key: Optional[str] = None,
 ) -> None:
     """
     Procesa ingesta de archivo en background.
     """
+    logger.info(f"[Ingest {ingest_id}] Iniciando procesamiento de archivo: {file_path}")
+    
     status_resp = _get_ingest_status(ingest_id)
     if not status_resp:
+        logger.error(f"[Ingest {ingest_id}] Estado no encontrado")
         return
     
     try:
@@ -252,27 +261,34 @@ async def _process_ingest_file(
         status_resp.message = "Procesando archivo..."
         _set_ingest_status(ingest_id, status_resp)
         
+        logger.info(f"[Ingest {ingest_id}] Ejecutando source_graph...")
         result = await run_source_graph(
             file_path=file_path,
             title=title,
             metadata=metadata,
+            user_openai_key=user_openai_key,
+            user_google_key=user_google_key,
         )
+        logger.info(f"[Ingest {ingest_id}] Resultado: {result}")
         
         if result.get("status") == "failed":
             status_resp.status = IngestStatus.FAILED
             status_resp.error = result.get("error", "Error desconocido")
             status_resp.message = f"Error: {status_resp.error}"
+            logger.error(f"[Ingest {ingest_id}] Falló: {status_resp.error}")
         else:
             status_resp.status = IngestStatus.COMPLETED
             status_resp.source_id = result.get("source_id")
             status_resp.chunks_created = result.get("chunk_count", 0)
             status_resp.progress = 1.0
             status_resp.message = f"Completado: {status_resp.chunks_created} chunks"
+            logger.info(f"[Ingest {ingest_id}] Completado: {status_resp.chunks_created} chunks")
         
         status_resp.completed_at = datetime.utcnow()
         _set_ingest_status(ingest_id, status_resp)
         
     except Exception as e:
+        logger.exception(f"[Ingest {ingest_id}] Excepción: {e}")
         status_resp.status = IngestStatus.FAILED
         status_resp.error = str(e)
         status_resp.message = f"Error: {str(e)}"
@@ -296,6 +312,8 @@ async def ingest_file(
     file: UploadFile = File(...),
     tags: List[str] = Form(default=[]),
     metadata: str = Form(default="{}"),
+    x_openai_key: Optional[str] = Header(default=None, alias="X-OpenAI-Key"),
+    x_google_key: Optional[str] = Header(default=None, alias="X-Google-Key"),
     db: Any = Depends(get_db),
 ) -> IngestResponse:
     """
@@ -357,6 +375,8 @@ async def ingest_file(
         tmp_path,
         filename,
         meta,
+        x_openai_key,
+        x_google_key,
     )
     
     return IngestResponse(
@@ -679,3 +699,111 @@ async def cancel_ingest(
     status_resp.message = "Cancelado por el usuario"
     status_resp.completed_at = datetime.utcnow()
     _set_ingest_status(ingest_id, status_resp)
+
+
+# ==========================================
+# Models para Sources
+# ==========================================
+
+class SourceInfo(BaseModel):
+    """Información de una fuente/documento."""
+    source_id: str
+    title: str
+    source_type: str
+    status: str = "completed"
+    chunk_count: int = 0
+    created_at: Optional[datetime] = None
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class SourcesListResponse(BaseModel):
+    """Respuesta con lista de fuentes."""
+    sources: List[SourceInfo]
+    total: int
+
+
+@router.get(
+    "/sources",
+    response_model=SourcesListResponse,
+    summary="Listar documentos",
+    description="Lista todos los documentos/fuentes ingestados",
+)
+async def list_sources(
+    limit: int = Query(default=100, le=500),
+    db: Any = Depends(get_db),
+) -> SourcesListResponse:
+    """
+    Lista todas las fuentes ingestadas en el sistema.
+    Combina información de la base de datos con ingestas pendientes.
+    """
+    sources: List[SourceInfo] = []
+    
+    # Obtener fuentes de la base de datos
+    try:
+        if db:
+            result = await db.execute(
+                f"SELECT * FROM source ORDER BY created_at DESC LIMIT {limit}"
+            )
+            
+            if result:
+                records = result if isinstance(result, list) else [result]
+                for record in records:
+                    if isinstance(record, dict) and "id" in record:
+                        # Manejar total_chunks que puede ser int, lista vacía, o None
+                        total_chunks = record.get("total_chunks", record.get("chunk_count", 0))
+                        if isinstance(total_chunks, list):
+                            total_chunks = len(total_chunks) if total_chunks else 0
+                        elif not isinstance(total_chunks, int):
+                            total_chunks = 0
+                        
+                        sources.append(SourceInfo(
+                            source_id=str(record.get("id", "")),
+                            title=record.get("title", record.get("name", "Sin título")),
+                            source_type=record.get("source_type", record.get("type", "text")),
+                            status="completed",
+                            chunk_count=total_chunks,
+                            created_at=record.get("created_at"),
+                            metadata=record.get("metadata", {})
+                        ))
+    except Exception as e:
+        # Si falla la BD, continuar con ingestas en memoria
+        import traceback
+        print(f"Error querying sources from DB: {e}")
+        traceback.print_exc()
+    
+    # Agregar ingestas completadas de la memoria (que podrían no estar en BD aún)
+    for ingest_id, ingest_status in _ingest_status.items():
+        if ingest_status.source_id and ingest_status.status == IngestStatus.COMPLETED:
+            # Verificar que no esté ya en la lista
+            existing = any(s.source_id == ingest_status.source_id for s in sources)
+            if not existing:
+                sources.append(SourceInfo(
+                    source_id=ingest_status.source_id,
+                    title=ingest_status.message.replace("Completado: ", "").replace(" chunks", " chunks"),
+                    source_type="file",
+                    status="completed",
+                    chunk_count=ingest_status.chunks_created,
+                    created_at=ingest_status.completed_at,
+                    metadata={}
+                ))
+    
+    # Agregar ingestas en proceso
+    for ingest_id, ingest_status in _ingest_status.items():
+        if ingest_status.status in [IngestStatus.PENDING, IngestStatus.PROCESSING]:
+            sources.append(SourceInfo(
+                source_id=ingest_id,
+                title=ingest_status.message,
+                source_type="file",
+                status=ingest_status.status.value,
+                chunk_count=0,
+                created_at=ingest_status.started_at,
+                metadata={}
+            ))
+    
+    # Ordenar por fecha
+    sources.sort(key=lambda x: x.created_at or datetime.min, reverse=True)
+    
+    return SourcesListResponse(
+        sources=sources[:limit],
+        total=len(sources)
+    )

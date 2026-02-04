@@ -178,7 +178,13 @@ async def save_source(state: IngestionState) -> IngestionState:
             metadata=content.metadata,
         )
         
-        state.source_id = result.get("id", str(uuid4()))
+        # El ID puede venir como "source:uuid" o solo "uuid"
+        raw_id = result.get("id", str(uuid4()))
+        # Extraer solo el UUID sin el prefijo de tabla
+        if isinstance(raw_id, str) and ":" in raw_id:
+            state.source_id = raw_id.split(":")[-1]
+        else:
+            state.source_id = str(raw_id)
         
     except Exception as e:
         state.error = f"Error guardando fuente: {e}"
@@ -253,7 +259,7 @@ async def save_chunks(state: IngestionState) -> IngestionState:
     
     try:
         for chunk in state.chunking_result.chunks:
-            # Crear nodo de chunk
+            # Crear nodo de chunk con el mismo ID que el chunk local
             await create_chunk_node(
                 content=chunk.content,
                 source_id=state.source_id or "",
@@ -261,6 +267,7 @@ async def save_chunks(state: IngestionState) -> IngestionState:
                 parent_chunk_id=chunk.parent_id,
                 token_count=chunk.token_count,
                 metadata=chunk.metadata,
+                chunk_id=chunk.id,  # Usar el ID del chunk local
             )
             
             # Enlazar con source
@@ -273,10 +280,14 @@ async def save_chunks(state: IngestionState) -> IngestionState:
         
         # Actualizar total de chunks en source
         if state.source_id:
-            await execute(
-                "UPDATE source SET total_chunks = $count WHERE id = type::thing('source', $id)",
-                {"count": len(state.chunking_result.chunks), "id": state.source_id}
-            )
+            # Limpiar el source_id de cualquier prefijo o caracteres especiales
+            clean_id = state.source_id.replace("source:", "").strip("⟨⟩`")
+            # Escapar ID con guiones
+            escaped_id = f"`{clean_id}`" if "-" in clean_id else clean_id
+            chunk_count = len(state.chunking_result.chunks)
+            
+            update_query = f"UPDATE source:{escaped_id} SET total_chunks = {chunk_count}"
+            await execute(update_query)
         
     except Exception as e:
         state.error = f"Error guardando chunks: {e}"
@@ -302,22 +313,39 @@ async def vectorize_chunks(state: IngestionState) -> IngestionState:
     
     state.status = IngestionStatus.VECTORIZING
     
+    # Obtener API keys del estado si están disponibles
+    user_openai_key = state.metadata.get("_user_openai_key")
+    user_google_key = state.metadata.get("_user_google_key")
+    
+    print(f"[VECTORIZE] Starting vectorization of {len(state.chunking_result.chunks)} chunks")
+    print(f"[VECTORIZE] Using client keys: openai={bool(user_openai_key)}, google={bool(user_google_key)}")
+    
     try:
-        # Vectorizar en batch
-        vectorized = await embed_chunks_batch(state.chunking_result.chunks)
+        # Vectorizar en batch con las API keys del cliente
+        vectorized = await embed_chunks_batch(
+            state.chunking_result.chunks,
+            user_openai_key=user_openai_key,
+            user_google_key=user_google_key,
+        )
+        print(f"[VECTORIZE] Got {len(vectorized)} vectorized chunks")
         
         state.vectorized_chunks = vectorized
         
         # Actualizar chunks con embeddings
         for vc in vectorized:
+            print(f"[VECTORIZE] Updating chunk {vc.chunk_id} with embedding dim={len(vc.embedding)}")
             await update_chunk_embedding(vc.chunk_id, vc.embedding)
         
         state.metadata["vectorization"] = {
             "total_vectorized": len(vectorized),
             "dimension": vectorized[0].dimension if vectorized else 0,
         }
+        print(f"[VECTORIZE] Completed successfully")
         
     except Exception as e:
+        import traceback
+        print(f"[VECTORIZE] Error: {e}")
+        traceback.print_exc()
         state.error = f"Error vectorizando: {e}"
         # No fallar completamente, continuar sin vectores
         state.metadata["vectorization_error"] = str(e)
@@ -393,6 +421,8 @@ async def run_source_graph(
     metadata: Optional[Dict[str, Any]] = None,
     run_transformations: bool = True,
     skip_vectorization: bool = False,
+    user_openai_key: Optional[str] = None,
+    user_google_key: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Ejecuta el pipeline completo de ingestión.
@@ -409,12 +439,17 @@ async def run_source_graph(
         metadata: Metadatos adicionales
         run_transformations: Si ejecutar transformaciones de grafos
         skip_vectorization: Si saltar vectorización
+        user_openai_key: API key de OpenAI del cliente
+        user_google_key: API key de Google del cliente
         
     Returns:
         Resultado de la ingestión con IDs y métricas
     """
     # Crear estado inicial
     state = IngestionState(metadata=metadata or {})
+    # Guardar las API keys en el estado para usarlas en vectorización
+    state.metadata["_user_openai_key"] = user_openai_key
+    state.metadata["_user_google_key"] = user_google_key
     
     try:
         # Paso 1: Procesar contenido

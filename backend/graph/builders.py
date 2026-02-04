@@ -151,6 +151,7 @@ async def create_chunk_node(
     token_count: int = 0,
     embedding: Optional[List[float]] = None,
     metadata: Optional[Dict[str, Any]] = None,
+    chunk_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Crea un nodo de chunk (fragmento de texto).
@@ -163,11 +164,13 @@ async def create_chunk_node(
         token_count: Número de tokens
         embedding: Vector de embedding
         metadata: Metadatos adicionales
+        chunk_id: ID específico para el chunk (opcional)
         
     Returns:
         Chunk creado
     """
     chunk = ChunkNode(
+        id=chunk_id,
         content=content,
         source_id=source_id,
         chunk_index=chunk_index,
@@ -278,8 +281,12 @@ async def create_edge(
     Returns:
         Relación creada
     """
+    # Escapar IDs con caracteres especiales usando backticks
+    escaped_from_id = f"`{from_id}`" if "-" in from_id else from_id
+    escaped_to_id = f"`{to_id}`" if "-" in to_id else to_id
+    
     query = f"""
-    RELATE {from_table}:{from_id}->{edge_type.value}->{to_table}:{to_id}
+    RELATE {from_table}:{escaped_from_id}->{edge_type.value}->{to_table}:{escaped_to_id}
     SET 
         weight = $weight,
         confidence = $confidence,

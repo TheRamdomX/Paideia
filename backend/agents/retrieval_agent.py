@@ -256,6 +256,8 @@ async def retrieve(
     strategy: Optional[StrategyDecision] = None,
     concepts: Optional[List[str]] = None,
     filters: Optional[Dict[str, Any]] = None,
+    openai_api_key: Optional[str] = None,
+    google_api_key: Optional[str] = None,
 ) -> RetrievalResult:
     """
     Ejecuta retrieval con la estrategia seleccionada.
@@ -266,6 +268,8 @@ async def retrieve(
         strategy: Estrategia a usar (si no se proporciona, se decide)
         concepts: Conceptos conocidos relacionados
         filters: Filtros adicionales
+        openai_api_key: API key de OpenAI del cliente
+        google_api_key: API key de Google del cliente
         
     Returns:
         RetrievalResult con los documentos recuperados
@@ -296,6 +300,8 @@ async def retrieve(
         response = await run_retrieval_graph(
             query=retrieval_query,
             config_override=config_override,
+            openai_api_key=openai_api_key,
+            google_api_key=google_api_key,
         )
         
         # Construir resultado

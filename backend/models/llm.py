@@ -189,37 +189,19 @@ class OpenAILLM(BaseLLM):
 # ==========================================
 
 class GoogleLLM(BaseLLM):
-    """Implementación de LLM usando Google Gemini."""
+    """Implementación de LLM usando Google Gemini (google-genai)."""
     
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self._model = None
-        self._configured = False
-    
-    def _configure(self):
-        """Configura la API de Google."""
-        if not self._configured:
-            import google.generativeai as genai
-            genai.configure(api_key=self.api_key)
-            self._configured = True
+        self._client = None
     
     @property
-    def model_instance(self):
-        """Lazy initialization del modelo Gemini."""
-        if self._model is None:
-            self._configure()
-            import google.generativeai as genai
-            
-            generation_config = {
-                "temperature": self.temperature,
-                "max_output_tokens": self.max_tokens,
-            }
-            
-            self._model = genai.GenerativeModel(
-                model_name=self.model,
-                generation_config=generation_config,
-            )
-        return self._model
+    def client(self):
+        """Lazy initialization del cliente Google GenAI."""
+        if self._client is None:
+            from google import genai
+            self._client = genai.Client(api_key=self.api_key)
+        return self._client
     
     @retry(
         stop=stop_after_attempt(2),
@@ -243,25 +225,46 @@ class GoogleLLM(BaseLLM):
         Returns:
             Texto generado
         """
-        full_prompt = prompt
-        if system_prompt:
-            full_prompt = f"{system_prompt}\n\n{prompt}"
-        
         try:
-            # Gemini es síncrono, lo ejecutamos en thread pool
+            from google.genai import types
+            
+            # Construir contenido
+            contents = []
+            if system_prompt:
+                contents.append(types.Content(
+                    role="user",
+                    parts=[types.Part(text=f"System: {system_prompt}")]
+                ))
+            contents.append(types.Content(
+                role="user", 
+                parts=[types.Part(text=prompt)]
+            ))
+            
+            # Configuración de generación
+            config = types.GenerateContentConfig(
+                temperature=kwargs.get("temperature", self.temperature),
+                max_output_tokens=kwargs.get("max_tokens", self.max_tokens),
+            )
+            
+            # Generar respuesta (la nueva API es async-friendly)
             loop = asyncio.get_event_loop()
             response = await loop.run_in_executor(
                 None,
-                lambda: self.model_instance.generate_content(full_prompt)
+                lambda: self.client.models.generate_content(
+                    model=self.model,
+                    contents=contents,
+                    config=config
+                )
             )
             
             return response.text if response.text else ""
+            
         except Exception as e:
             error_msg = str(e).lower()
-            if "not found" in error_msg or "404" in error_msg:
+            if "not found" in error_msg or "404" in error_msg or "could not find model" in error_msg:
                 raise ValueError(
                     f"Modelo '{self.model}' no encontrado. "
-                    f"Modelos válidos: gemini-2.0-flash, gemini-1.5-flash, gemini-1.5-pro"
+                    f"Modelos válidos: gemini-2.0-flash, gemini-1.5-flash, gemini-1.5-pro, gemma-3-27b-it"
                 ) from e
             elif "api key" in error_msg or "invalid" in error_msg or "unauthorized" in error_msg:
                 raise ValueError(
@@ -287,17 +290,32 @@ class GoogleLLM(BaseLLM):
         Yields:
             Chunks de texto generado
         """
-        full_prompt = prompt
-        if system_prompt:
-            full_prompt = f"{system_prompt}\n\n{prompt}"
+        from google.genai import types
         
-        # Gemini streaming es síncrono
+        # Construir contenido
+        contents = []
+        if system_prompt:
+            contents.append(types.Content(
+                role="user",
+                parts=[types.Part(text=f"System: {system_prompt}")]
+            ))
+        contents.append(types.Content(
+            role="user", 
+            parts=[types.Part(text=prompt)]
+        ))
+        
+        config = types.GenerateContentConfig(
+            temperature=kwargs.get("temperature", self.temperature),
+            max_output_tokens=kwargs.get("max_tokens", self.max_tokens),
+        )
+        
         loop = asyncio.get_event_loop()
         
         def stream_generate():
-            return self.model_instance.generate_content(
-                full_prompt,
-                stream=True
+            return self.client.models.generate_content_stream(
+                model=self.model,
+                contents=contents,
+                config=config
             )
         
         response = await loop.run_in_executor(None, stream_generate)
@@ -321,34 +339,45 @@ class GoogleLLM(BaseLLM):
         Returns:
             Texto generado
         """
+        from google.genai import types
+        
         # Convertir mensajes a formato Gemini
-        gemini_messages = []
-        system_content = ""
+        contents = []
         
         for msg in messages:
             role = msg.get("role", "user")
             content = msg.get("content", "")
             
             if role == "system":
-                system_content = content
+                # System prompt como mensaje de usuario con prefijo
+                contents.append(types.Content(
+                    role="user",
+                    parts=[types.Part(text=f"System: {content}")]
+                ))
             elif role == "user":
-                gemini_messages.append({"role": "user", "parts": [content]})
+                contents.append(types.Content(
+                    role="user",
+                    parts=[types.Part(text=content)]
+                ))
             elif role == "assistant":
-                gemini_messages.append({"role": "model", "parts": [content]})
+                contents.append(types.Content(
+                    role="model",
+                    parts=[types.Part(text=content)]
+                ))
         
-        # Si hay system prompt, lo agregamos al primer mensaje
-        if system_content and gemini_messages:
-            first_msg = gemini_messages[0]
-            first_msg["parts"][0] = f"{system_content}\n\n{first_msg['parts'][0]}"
+        config = types.GenerateContentConfig(
+            temperature=kwargs.get("temperature", self.temperature),
+            max_output_tokens=kwargs.get("max_tokens", self.max_tokens),
+        )
         
         loop = asyncio.get_event_loop()
-        
-        # Usar chat para múltiples mensajes
-        chat = self.model_instance.start_chat(history=gemini_messages[:-1])
-        
         response = await loop.run_in_executor(
             None,
-            lambda: chat.send_message(gemini_messages[-1]["parts"][0])
+            lambda: self.client.models.generate_content(
+                model=self.model,
+                contents=contents,
+                config=config
+            )
         )
         
         return response.text if response.text else ""

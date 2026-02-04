@@ -156,12 +156,12 @@ def _get_cache_key(question: str, student_id: Optional[str]) -> str:
 )
 async def query_student(
     request: QueryRequest,
-    x_session_id: Optional[str] = Header(default=None, alias="X-Session-ID"),
-    x_student_id: Optional[str] = Header(default=None, alias="X-Student-ID"),
-    x_openai_key: Optional[str] = Header(default=None, alias="X-OpenAI-Key"),
-    x_google_key: Optional[str] = Header(default=None, alias="X-Google-Key"),
-    x_preferred_provider: Optional[str] = Header(default=None, alias="X-Preferred-Provider"),
-    x_model: Optional[str] = Header(default=None, alias="X-Model"),
+    x_session_id: Optional[str] = Header(default=None),
+    x_student_id: Optional[str] = Header(default=None),
+    x_openai_key: Optional[str] = Header(default=None),
+    x_google_key: Optional[str] = Header(default=None),
+    x_preferred_provider: Optional[str] = Header(default=None),
+    x_model: Optional[str] = Header(default=None),
     db: Any = Depends(get_db),
 ) -> QueryResponse:
     """
@@ -209,6 +209,8 @@ async def query_student(
         query=request.question,
         strategy=strategy_decision,
         student_id=student_id,
+        openai_api_key=x_openai_key,
+        google_api_key=x_google_key,
     )
     
     # Re-score si hay student_id
@@ -367,6 +369,10 @@ async def query_stream(
     request: QueryRequest,
     x_session_id: Optional[str] = Header(default=None),
     x_student_id: Optional[str] = Header(default=None),
+    x_openai_key: Optional[str] = Header(default=None, alias="X-OpenAI-Key"),
+    x_google_key: Optional[str] = Header(default=None, alias="X-Google-Key"),
+    x_preferred_provider: Optional[str] = Header(default=None, alias="X-Preferred-Provider"),
+    x_model: Optional[str] = Header(default=None, alias="X-Model"),
     db: Any = Depends(get_db),
 ) -> StreamingResponse:
     """
@@ -388,6 +394,8 @@ async def query_stream(
         query=request.question,
         strategy=strategy_decision,
         session_id=session_id,
+        openai_api_key=x_openai_key,
+        google_api_key=x_google_key,
     )
     
     # Configurar prompt
@@ -437,6 +445,10 @@ async def query_debug(
     request: QueryRequest,
     x_session_id: Optional[str] = Header(default=None),
     x_student_id: Optional[str] = Header(default=None),
+    x_openai_key: Optional[str] = Header(default=None, alias="X-OpenAI-Key"),
+    x_google_key: Optional[str] = Header(default=None, alias="X-Google-Key"),
+    x_preferred_provider: Optional[str] = Header(default=None, alias="X-Preferred-Provider"),
+    x_model: Optional[str] = Header(default=None, alias="X-Model"),
     db: Any = Depends(get_db),
 ) -> QueryDebugResponse:
     """
@@ -467,6 +479,8 @@ async def query_debug(
         query=request.question,
         strategy=strategy_decision,
         student_id=student_id,
+        openai_api_key=x_openai_key,
+        google_api_key=x_google_key,
     )
     
     # Re-score

@@ -14,13 +14,67 @@
                 <span class="logo-icon">🎓</span>
                 <h1>Paideia</h1>
             </div>
-            <div class="user-section">
+            <div class="header-actions">
+                <button id="btn-documents" class="btn-icon" title="Documentos">
+                    <span>📚</span>
+                    <span id="docs-count-badge" class="badge hidden">0</span>
+                </button>
                 <button id="btn-user-config" class="btn-icon" title="Configurar Usuario">
                     <span>👤</span>
                     <span id="current-user-display">Sin identificar</span>
                 </button>
             </div>
         </header>
+
+        <!-- Modal de Documentos -->
+        <div id="docs-modal" class="modal hidden">
+            <div class="modal-content modal-large">
+                <div class="modal-header">
+                    <h2>📚 Documentos</h2>
+                    <button id="btn-close-docs-modal" class="btn-close">&times;</button>
+                </div>
+                <div class="modal-body">
+                    <!-- Subir archivo -->
+                    <div class="config-section">
+                        <h3>📤 Subir Documento</h3>
+                        <p>Sube archivos para que el asistente los analice y pueda responder preguntas sobre ellos.</p>
+                        
+                        <div class="upload-zone" id="upload-zone">
+                            <input type="file" id="doc-file-input" accept=".pdf,.txt,.md,.markdown,.docx,.doc" hidden>
+                            <div class="upload-zone-content">
+                                <span class="upload-icon">📁</span>
+                                <p>Arrastra un archivo aquí o <button id="btn-select-file" class="link-button">selecciona uno</button></p>
+                                <span class="upload-hint">PDF, TXT, Markdown, DOCX</span>
+                            </div>
+                        </div>
+                        
+                        <div id="upload-progress" class="upload-progress hidden">
+                            <div class="progress-info">
+                                <span id="upload-file-name">archivo.pdf</span>
+                                <span id="upload-status">Subiendo...</span>
+                            </div>
+                            <div class="progress-bar">
+                                <div id="progress-fill" class="progress-fill"></div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Lista de documentos -->
+                    <div class="config-section">
+                        <h3>📄 Documentos Cargados</h3>
+                        <div id="docs-list" class="docs-list">
+                            <div class="docs-empty">
+                                <span>📭</span>
+                                <p>No hay documentos cargados</p>
+                            </div>
+                        </div>
+                        <button id="btn-refresh-docs" class="btn btn-secondary btn-sm">
+                            🔄 Actualizar lista
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
 
         <!-- Modal de configuración de usuario -->
         <div id="user-modal" class="modal hidden">
@@ -129,15 +183,6 @@
         <!-- Input Area -->
         <footer class="input-area">
             <div class="input-container">
-                <button id="btn-upload" class="btn-icon" title="Subir archivo">
-                    📎
-                </button>
-                <input 
-                    type="file" 
-                    id="file-input" 
-                    accept=".pdf,.txt,.md,.markdown"
-                    hidden
-                >
                 <textarea 
                     id="message-input" 
                     placeholder="Escribe tu pregunta..."
@@ -146,10 +191,6 @@
                 <button id="btn-send" class="btn-send" title="Enviar mensaje">
                     ➤
                 </button>
-            </div>
-            <div id="upload-preview" class="upload-preview hidden">
-                <span id="file-name"></span>
-                <button id="btn-cancel-upload" class="btn-cancel">&times;</button>
             </div>
         </footer>
     </div>

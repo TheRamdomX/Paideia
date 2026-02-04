@@ -7,7 +7,8 @@
 // Configuración
 // ==========================================
 
-const API_BASE_URL = 'http://localhost:8080/api/v1';
+// Usa ruta relativa para funcionar tanto en desarrollo como en Docker con nginx proxy
+const API_BASE_URL = '/api/v1';
 
 // Estado de la aplicación
 const state = {
@@ -17,9 +18,9 @@ const state = {
     googleKey: localStorage.getItem('paideia_google_key') || null,
     preferredProvider: localStorage.getItem('paideia_preferred_provider') || null,
     model: localStorage.getItem('paideia_model') || null,
-    selectedFile: null,
     isLoading: false,
-    chatHistory: JSON.parse(localStorage.getItem('paideia_chat_history') || '[]')
+    chatHistory: JSON.parse(localStorage.getItem('paideia_chat_history') || '[]'),
+    documents: []  // Lista de documentos ingestados
 };
 
 // ==========================================
@@ -69,11 +70,6 @@ const elements = {
     chatMessages: document.getElementById('chat-messages'),
     messageInput: document.getElementById('message-input'),
     btnSend: document.getElementById('btn-send'),
-    btnUpload: document.getElementById('btn-upload'),
-    fileInput: document.getElementById('file-input'),
-    uploadPreview: document.getElementById('upload-preview'),
-    fileName: document.getElementById('file-name'),
-    btnCancelUpload: document.getElementById('btn-cancel-upload'),
     btnUserConfig: document.getElementById('btn-user-config'),
     userModal: document.getElementById('user-modal'),
     btnCloseModal: document.getElementById('btn-close-modal'),
@@ -84,7 +80,21 @@ const elements = {
     modelSelect: document.getElementById('model-select'),
     btnSaveUser: document.getElementById('btn-save-user'),
     btnClearUser: document.getElementById('btn-clear-user'),
-    currentUserDisplay: document.getElementById('current-user-display')
+    currentUserDisplay: document.getElementById('current-user-display'),
+    // Elementos del modal de documentos
+    btnDocuments: document.getElementById('btn-documents'),
+    docsModal: document.getElementById('docs-modal'),
+    btnCloseDocsModal: document.getElementById('btn-close-docs-modal'),
+    uploadZone: document.getElementById('upload-zone'),
+    docFileInput: document.getElementById('doc-file-input'),
+    btnSelectFile: document.getElementById('btn-select-file'),
+    uploadProgress: document.getElementById('upload-progress'),
+    uploadFileName: document.getElementById('upload-file-name'),
+    uploadStatus: document.getElementById('upload-status'),
+    progressFill: document.getElementById('progress-fill'),
+    docsList: document.getElementById('docs-list'),
+    btnRefreshDocs: document.getElementById('btn-refresh-docs'),
+    docsCountBadge: document.getElementById('docs-count-badge')
 };
 
 // ==========================================
@@ -236,7 +246,7 @@ async function sendQuery(question) {
         headers['X-Model'] = state.model;
     }
 
-    const response = await fetch(`${API_BASE_URL}/query/`, {
+    const response = await fetch(`${API_BASE_URL}/query`, {
         method: 'POST',
         headers,
         body: JSON.stringify({
@@ -263,8 +273,18 @@ async function uploadFile(file) {
         session_id: state.sessionId
     }));
 
+    // Preparar headers con API keys
+    const headers = {};
+    if (state.openaiKey) {
+        headers['X-OpenAI-Key'] = state.openaiKey;
+    }
+    if (state.googleKey) {
+        headers['X-Google-Key'] = state.googleKey;
+    }
+
     const response = await fetch(`${API_BASE_URL}/ingest/file`, {
         method: 'POST',
+        headers: headers,
         body: formData
     });
 
@@ -283,7 +303,7 @@ async function uploadFile(file) {
 async function handleSendMessage() {
     const message = elements.messageInput.value.trim();
     
-    if (!message && !state.selectedFile) {
+    if (!message) {
         return;
     }
 
@@ -295,64 +315,31 @@ async function handleSendMessage() {
     elements.btnSend.disabled = true;
 
     try {
-        // Si hay un archivo seleccionado, subirlo primero
-        if (state.selectedFile) {
-            addMessage({
-                id: generateMessageId(),
-                role: 'system',
-                content: `Subiendo archivo: ${state.selectedFile.name}...`,
-                persist: true
-            });
+        // Agregar mensaje del usuario
+        addMessage({
+            id: generateMessageId(),
+            role: 'user',
+            content: message
+        });
 
-            try {
-                const uploadResult = await uploadFile(state.selectedFile);
-                addMessage({
-                    id: generateMessageId(),
-                    role: 'system',
-                    content: `Archivo "${state.selectedFile.name}" procesado correctamente. ${uploadResult.chunks_created || ''} chunks creados.`,
-                    persist: true
-                });
-            } catch (error) {
-                addMessage({
-                    id: generateMessageId(),
-                    role: 'system',
-                    content: `Error subiendo archivo: ${error.message}`,
-                    isError: true
-                });
-            }
+        // Limpiar input
+        elements.messageInput.value = '';
+        autoResizeTextarea();
 
-            // Limpiar selección de archivo
-            clearFileSelection();
-        }
+        // Mostrar indicador de carga
+        showLoading();
 
-        // Si hay un mensaje, enviarlo
-        if (message) {
-            // Agregar mensaje del usuario
-            addMessage({
-                id: generateMessageId(),
-                role: 'user',
-                content: message
-            });
+        // Enviar consulta
+        const response = await sendQuery(message);
 
-            // Limpiar input
-            elements.messageInput.value = '';
-            autoResizeTextarea();
-
-            // Mostrar indicador de carga
-            showLoading();
-
-            // Enviar consulta
-            const response = await sendQuery(message);
-
-            // Agregar respuesta del asistente
-            addMessage({
-                id: response.query_id || generateMessageId(),
-                role: 'assistant',
-                content: response.answer,
-                sources: response.sources || [],
-                confidence: response.confidence
-            });
-        }
+        // Agregar respuesta del asistente
+        addMessage({
+            id: response.query_id || generateMessageId(),
+            role: 'assistant',
+            content: response.answer,
+            sources: response.sources || [],
+            confidence: response.confidence
+        });
 
     } catch (error) {
         hideLoading();
@@ -367,21 +354,6 @@ async function handleSendMessage() {
         elements.btnSend.disabled = false;
         elements.messageInput.focus();
     }
-}
-
-function handleFileSelect(event) {
-    const file = event.target.files[0];
-    if (file) {
-        state.selectedFile = file;
-        elements.fileName.textContent = `📄 ${file.name}`;
-        elements.uploadPreview.classList.remove('hidden');
-    }
-}
-
-function clearFileSelection() {
-    state.selectedFile = null;
-    elements.fileInput.value = '';
-    elements.uploadPreview.classList.add('hidden');
 }
 
 function handleKeyPress(event) {
@@ -543,6 +515,178 @@ function updateUserDisplay() {
 }
 
 // ==========================================
+// Modal de Documentos
+// ==========================================
+
+function openDocsModal() {
+    elements.docsModal.classList.remove('hidden');
+    loadDocumentsList();
+}
+
+function closeDocsModal() {
+    elements.docsModal.classList.add('hidden');
+    resetUploadProgress();
+}
+
+function resetUploadProgress() {
+    elements.uploadProgress.classList.add('hidden');
+    elements.progressFill.style.width = '0%';
+    elements.progressFill.classList.remove('complete');
+    elements.uploadStatus.textContent = '';
+    elements.uploadStatus.className = '';
+}
+
+async function loadDocumentsList() {
+    try {
+        const response = await fetch(`${API_BASE_URL}/ingest/sources`);
+        if (!response.ok) {
+            throw new Error('Error cargando documentos');
+        }
+        
+        const data = await response.json();
+        state.documents = data.sources || [];
+        renderDocumentsList();
+        updateDocsCount();
+    } catch (error) {
+        console.error('Error loading documents:', error);
+        // Mostrar lista vacía si hay error
+        state.documents = [];
+        renderDocumentsList();
+    }
+}
+
+function renderDocumentsList() {
+    if (state.documents.length === 0) {
+        elements.docsList.innerHTML = `
+            <div class="docs-empty">
+                <span>📭</span>
+                <p>No hay documentos cargados</p>
+            </div>
+        `;
+        return;
+    }
+    
+    elements.docsList.innerHTML = state.documents.map(doc => {
+        const icon = getFileIcon(doc.source_type || doc.type || 'text');
+        const status = doc.status || 'completed';
+        const statusClass = status.toLowerCase();
+        const statusText = {
+            'completed': 'Listo',
+            'processing': 'Procesando',
+            'pending': 'Pendiente',
+            'failed': 'Error'
+        }[statusClass] || status;
+        
+        const date = doc.created_at ? new Date(doc.created_at).toLocaleDateString() : '';
+        const chunks = doc.chunk_count ? `${doc.chunk_count} chunks` : '';
+        const meta = [date, chunks].filter(Boolean).join(' • ');
+        
+        return `
+            <div class="doc-item" data-id="${doc.source_id || doc.id}">
+                <div class="doc-info">
+                    <span class="doc-icon">${icon}</span>
+                    <div class="doc-details">
+                        <div class="doc-name">${escapeHtml(doc.title || doc.name || 'Sin título')}</div>
+                        <div class="doc-meta">${meta}</div>
+                    </div>
+                </div>
+                <div class="doc-status">
+                    <span class="status-badge ${statusClass}">${statusText}</span>
+                </div>
+            </div>
+        `;
+    }).join('');
+}
+
+function getFileIcon(type) {
+    const icons = {
+        'pdf': '📕',
+        'text': '📄',
+        'txt': '📄',
+        'markdown': '📝',
+        'md': '📝',
+        'docx': '📘',
+        'doc': '📘',
+        'web': '🌐',
+        'youtube': '🎬',
+        'audio': '🎵',
+        'video': '🎥'
+    };
+    return icons[type.toLowerCase()] || '📄';
+}
+
+function updateDocsCount() {
+    const count = state.documents.length;
+    if (count > 0) {
+        elements.docsCountBadge.textContent = count > 99 ? '99+' : count;
+        elements.docsCountBadge.classList.remove('hidden');
+    } else {
+        elements.docsCountBadge.classList.add('hidden');
+    }
+}
+
+async function handleDocumentUpload(file) {
+    // Mostrar progreso
+    elements.uploadProgress.classList.remove('hidden');
+    elements.uploadFileName.textContent = file.name;
+    elements.uploadStatus.textContent = 'Subiendo...';
+    elements.uploadStatus.className = '';
+    elements.progressFill.style.width = '30%';
+    
+    try {
+        const result = await uploadFile(file);
+        
+        // Actualizar progreso
+        elements.progressFill.style.width = '100%';
+        elements.progressFill.classList.add('complete');
+        elements.uploadStatus.textContent = `✓ ${result.chunks_created || 0} chunks creados`;
+        elements.uploadStatus.className = 'success';
+        
+        // Recargar lista
+        setTimeout(() => {
+            loadDocumentsList();
+            // Resetear después de 3 segundos
+            setTimeout(resetUploadProgress, 3000);
+        }, 500);
+        
+    } catch (error) {
+        elements.progressFill.style.width = '100%';
+        elements.uploadStatus.textContent = `✗ ${error.message}`;
+        elements.uploadStatus.className = 'error';
+    }
+}
+
+function setupDragAndDrop() {
+    const zone = elements.uploadZone;
+    
+    ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(eventName => {
+        zone.addEventListener(eventName, (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+        });
+    });
+    
+    ['dragenter', 'dragover'].forEach(eventName => {
+        zone.addEventListener(eventName, () => {
+            zone.classList.add('drag-over');
+        });
+    });
+    
+    ['dragleave', 'drop'].forEach(eventName => {
+        zone.addEventListener(eventName, () => {
+            zone.classList.remove('drag-over');
+        });
+    });
+    
+    zone.addEventListener('drop', (e) => {
+        const files = e.dataTransfer.files;
+        if (files.length > 0) {
+            handleDocumentUpload(files[0]);
+        }
+    });
+}
+
+// ==========================================
 // Inicialización
 // ==========================================
 
@@ -552,16 +696,14 @@ function init() {
 
     // Cargar historial de chat
     loadChatHistory();
+    
+    // Cargar lista de documentos inicial
+    loadDocumentsList();
 
     // Event listeners - Envío de mensajes
     elements.btnSend.addEventListener('click', handleSendMessage);
     elements.messageInput.addEventListener('keypress', handleKeyPress);
     elements.messageInput.addEventListener('input', autoResizeTextarea);
-
-    // Event listeners - Subida de archivos
-    elements.btnUpload.addEventListener('click', () => elements.fileInput.click());
-    elements.fileInput.addEventListener('change', handleFileSelect);
-    elements.btnCancelUpload.addEventListener('click', clearFileSelection);
 
     // Event listeners - Modal de usuario
     elements.btnUserConfig.addEventListener('click', openUserModal);
@@ -569,17 +711,47 @@ function init() {
     elements.btnSaveUser.addEventListener('click', saveUser);
     elements.btnClearUser.addEventListener('click', clearUser);
 
-    // Cerrar modal al hacer clic fuera
+    // Event listeners - Modal de documentos
+    elements.btnDocuments.addEventListener('click', openDocsModal);
+    elements.btnCloseDocsModal.addEventListener('click', closeDocsModal);
+    elements.btnSelectFile.addEventListener('click', () => elements.docFileInput.click());
+    elements.uploadZone.addEventListener('click', (e) => {
+        if (e.target !== elements.btnSelectFile) {
+            elements.docFileInput.click();
+        }
+    });
+    elements.docFileInput.addEventListener('change', (e) => {
+        if (e.target.files.length > 0) {
+            handleDocumentUpload(e.target.files[0]);
+            e.target.value = ''; // Reset para permitir subir el mismo archivo otra vez
+        }
+    });
+    elements.btnRefreshDocs.addEventListener('click', loadDocumentsList);
+    
+    // Setup drag and drop
+    setupDragAndDrop();
+
+    // Cerrar modales al hacer clic fuera
     elements.userModal.addEventListener('click', (e) => {
         if (e.target === elements.userModal) {
             closeUserModal();
         }
     });
+    elements.docsModal.addEventListener('click', (e) => {
+        if (e.target === elements.docsModal) {
+            closeDocsModal();
+        }
+    });
 
-    // Cerrar modal con Escape
+    // Cerrar modales con Escape
     document.addEventListener('keydown', (e) => {
-        if (e.key === 'Escape' && !elements.userModal.classList.contains('hidden')) {
-            closeUserModal();
+        if (e.key === 'Escape') {
+            if (!elements.userModal.classList.contains('hidden')) {
+                closeUserModal();
+            }
+            if (!elements.docsModal.classList.contains('hidden')) {
+                closeDocsModal();
+            }
         }
     });
 

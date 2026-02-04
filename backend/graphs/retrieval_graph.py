@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 from backend.graph.traversal import (
     GraphNode,
@@ -131,16 +131,16 @@ async def vector_retrieval(
         Lista de resultados rankeados
     """
     response = await search_by_embedding(
-        query_embedding=query_embedding,
+        embedding=query_embedding,
         table=table,
         embedding_field=field,
-        top_k=top_k,
-        metric="cosine",
+        limit=top_k,
+        filters=filters,
     )
     
     results = []
     
-    for vr in response.results:
+    for vr in response:
         result = RankedResult(
             id=vr.id,
             content=vr.content,
@@ -309,23 +309,29 @@ def merge_results(
 # ==========================================
 
 async def retrieve(
-    query: str,
+    query: Union[str, RetrievalQuery],
     mode: RetrievalMode = RetrievalMode.HYBRID,
     top_k: int = 10,
     concepts: Optional[List[str]] = None,
     filters: Optional[Dict[str, Any]] = None,
     config: Optional[HybridRankingConfig] = None,
+    config_override: Optional[Dict[str, Any]] = None,
+    openai_api_key: Optional[str] = None,
+    google_api_key: Optional[str] = None,
 ) -> RetrievalResponse:
     """
     Pipeline principal de retrieval.
     
     Args:
-        query: Texto de consulta
+        query: Texto de consulta o RetrievalQuery
         mode: Modo de retrieval
         top_k: Número de resultados finales
         concepts: Conceptos iniciales para graph retrieval
         filters: Filtros adicionales
         config: Configuración de ranking
+        config_override: Override de configuración (para compatibilidad)
+        openai_api_key: API key de OpenAI del cliente
+        google_api_key: API key de Google del cliente
         
     Returns:
         RetrievalResponse con resultados combinados
@@ -333,13 +339,27 @@ async def retrieve(
     if config is None:
         config = get_retrieval_config()
     
-    retrieval_query = RetrievalQuery(
-        text=query,
-        concepts=concepts or [],
-        filters=filters or {},
-        mode=mode,
-        top_k=top_k,
-    )
+    # Soportar query como str o RetrievalQuery
+    if isinstance(query, RetrievalQuery):
+        retrieval_query = query
+        query_text = query.text
+        if query.mode:
+            mode = query.mode
+        if query.top_k:
+            top_k = query.top_k
+        if query.concepts:
+            concepts = query.concepts
+        if query.filters:
+            filters = query.filters
+    else:
+        query_text = query
+        retrieval_query = RetrievalQuery(
+            text=query_text,
+            concepts=concepts or [],
+            filters=filters or {},
+            mode=mode,
+            top_k=top_k,
+        )
     
     response = RetrievalResponse(query=retrieval_query)
     
@@ -351,20 +371,40 @@ async def retrieve(
         # Ejecutar retrievals según modo
         if mode in [RetrievalMode.VECTOR_ONLY, RetrievalMode.HYBRID, RetrievalMode.ADAPTIVE]:
             # Obtener embedding de la query
-            embeddings = await batch_embed([query])
+            print(f"[RETRIEVAL] Generating query embedding with keys: openai={bool(openai_api_key)}, google={bool(google_api_key)}")
+            try:
+                embeddings = await batch_embed(
+                    [query_text],
+                    user_openai_key=openai_api_key,
+                    user_google_key=google_api_key,
+                )
+                print(f"[RETRIEVAL] Embedding result: {len(embeddings[0]) if embeddings and embeddings[0] else 0} dimensions")
+            except Exception as emb_error:
+                import traceback
+                print(f"[RETRIEVAL] Embedding ERROR: {emb_error}")
+                print(f"[RETRIEVAL] Traceback: {traceback.format_exc()}")
+                embeddings = [[]]
             
             if embeddings and embeddings[0]:
+                print(f"[RETRIEVAL] Embedding has {len(embeddings[0])} values, first: {embeddings[0][0]:.4f}")
                 retrieval_query.embedding = embeddings[0]
-                vector_results = await vector_retrieval(
-                    query_embedding=embeddings[0],
-                    top_k=top_k * 2,  # Obtener más para merge
-                    filters=filters,
-                )
+                try:
+                    vector_results = await vector_retrieval(
+                        query_embedding=embeddings[0],
+                        top_k=top_k * 2,  # Obtener más para merge
+                        filters=filters,
+                    )
+                    print(f"[RETRIEVAL] Vector results: {len(vector_results)}")
+                except Exception as vr_error:
+                    print(f"[RETRIEVAL] Vector search ERROR: {vr_error}")
+                    vector_results = []
                 response.vector_results = len(vector_results)
+            else:
+                print(f"[RETRIEVAL] No valid embedding generated")
         
         if mode in [RetrievalMode.BM25_ONLY, RetrievalMode.HYBRID, RetrievalMode.ADAPTIVE]:
             bm25_results = await bm25_retrieval(
-                query_text=query,
+                query_text=query_text,
                 top_k=top_k * 2,
             )
             response.bm25_results = len(bm25_results)
@@ -372,7 +412,7 @@ async def retrieve(
         if mode in [RetrievalMode.GRAPH_ONLY, RetrievalMode.HYBRID, RetrievalMode.ADAPTIVE]:
             # Si no hay conceptos, buscarlos
             if not concepts:
-                found_concepts = await find_concepts_by_query(query, limit=3)
+                found_concepts = await find_concepts_by_query(query_text, limit=3)
                 concepts = [c.id for c in found_concepts]
             
             if concepts:
