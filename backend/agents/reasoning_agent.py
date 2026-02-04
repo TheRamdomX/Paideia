@@ -442,8 +442,8 @@ async def generate_answer(
             max_tokens=max_tokens,
         )
         
-        # Extraer fuentes y conceptos
-        sources = [chunk.id for chunk in context_chunks[:5]]
+        # Extraer fuentes legibles y conceptos
+        sources = _format_sources(context_chunks[:5])
         concepts = _extract_concepts_from_chunks(context_chunks)
         
         # Calcular confianza basada en contexto y modo
@@ -589,6 +589,68 @@ def adapt_response_complexity(
 # ==========================================
 # Utilidades
 # ==========================================
+
+def _format_sources(chunks: List[RankedResult]) -> List[str]:
+    """
+    Formatea fuentes legibles para mostrar al usuario.
+    
+    En lugar de IDs de chunks, muestra:
+    - Nombre del documento/fuente
+    - Posición (página, sección, o índice de chunk)
+    
+    Args:
+        chunks: Lista de chunks usados como contexto
+        
+    Returns:
+        Lista de strings legibles con las fuentes
+    """
+    sources: List[str] = []
+    seen_sources: set = set()
+    
+    for chunk in chunks:
+        metadata = chunk.metadata or {}
+        
+        # Obtener título del documento
+        source_title = (
+            metadata.get("source_title") or
+            metadata.get("title") or
+            metadata.get("file_name") or
+            metadata.get("name") or
+            chunk.source_id or
+            "Documento"
+        )
+        
+        # Obtener posición en el documento
+        page = metadata.get("page") or metadata.get("page_number")
+        section = metadata.get("section") or metadata.get("heading")
+        chunk_index = metadata.get("chunk_index", metadata.get("index"))
+        line_start = metadata.get("line_start") or metadata.get("start_line")
+        
+        # Construir indicador de posición
+        position_parts: List[str] = []
+        if page:
+            position_parts.append(f"pág. {page}")
+        if section:
+            position_parts.append(f"§ {section}")
+        if line_start:
+            position_parts.append(f"línea {line_start}")
+        elif chunk_index is not None:
+            position_parts.append(f"fragmento {chunk_index + 1}")
+        
+        # Formatear fuente
+        if position_parts:
+            source_str = f"{source_title} ({', '.join(position_parts)})"
+        else:
+            source_str = source_title
+        
+        # Evitar duplicados
+        source_key = f"{source_title}:{page or chunk_index or 0}"
+        if source_key not in seen_sources:
+            sources.append(source_str)
+            seen_sources.add(source_key)
+    
+    return sources
+
 
 def _extract_concepts_from_chunks(chunks: List[RankedResult]) -> List[str]:
     """Extrae conceptos únicos de los chunks."""

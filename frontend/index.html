@@ -182,35 +182,21 @@
 
         <!-- Input Area -->
         <footer class="input-area">
-            <!-- Selector de Modo Pedagógico -->
-            <div class="mode-selector">
-                <span class="mode-label">Modo:</span>
-                <div class="mode-buttons">
-                    <button class="mode-btn active" data-mode="" title="Detecta automáticamente el tipo de respuesta">
-                        <span class="mode-icon">🔮</span>
-                        <span class="mode-text">Auto</span>
-                    </button>
-                    <button class="mode-btn" data-mode="concept" title="Explicaciones teóricas y definiciones">
-                        <span class="mode-icon">📚</span>
-                        <span class="mode-text">Concepto</span>
-                    </button>
-                    <button class="mode-btn" data-mode="practice" title="Resolución de ejercicios paso a paso">
-                        <span class="mode-icon">✏️</span>
-                        <span class="mode-text">Práctica</span>
-                    </button>
-                    <button class="mode-btn" data-mode="exercise_list" title="Lista de ejercicios disponibles">
-                        <span class="mode-icon">📋</span>
-                        <span class="mode-text">Ejercicios</span>
-                    </button>
-                </div>
-            </div>
-            
             <div class="input-container">
                 <textarea 
                     id="message-input" 
                     placeholder="Escribe tu pregunta..."
                     rows="1"
                 ></textarea>
+                
+                <!-- Selector de Modo Pedagógico -->
+                <select id="mode-select" class="mode-select" title="Modo pedagógico">
+                    <option value="">🔮 Auto</option>
+                    <option value="concept">📚 Concepto</option>
+                    <option value="practice">✏️ Práctica</option>
+                    <option value="exercise_list">📋 Ejercicios</option>
+                </select>
+                
                 <button id="btn-send" class="btn-send" title="Enviar mensaje">
                     ➤
                 </button>

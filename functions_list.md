@@ -25,6 +25,7 @@ backend/agents/reasoning_agent.py
   def generate_answer_stream
   def adapt_to_student
   def adapt_response_complexity
+  def _format_sources
   def _extract_concepts_from_chunks
   def _calculate_confidence
   def get_suggested_followups

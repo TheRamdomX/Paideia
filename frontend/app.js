@@ -696,54 +696,37 @@ function setupDragAndDrop() {
 }
 
 // ==========================================
-// Mode Selector (Selector de Modo Pedagógico)
+// Mode Selector (Select de Modo Pedagógico)
 // ==========================================
 
 function initModeSelector() {
-    const modeButtons = document.querySelectorAll('.mode-btn');
+    const modeSelect = document.getElementById('mode-select');
     
     // Restaurar modo guardado
     if (state.learningMode) {
-        modeButtons.forEach(btn => {
-            btn.classList.remove('active');
-            if (btn.dataset.mode === state.learningMode) {
-                btn.classList.add('active');
-            }
-        });
+        modeSelect.value = state.learningMode;
     }
     
-    // Agregar event listeners
-    modeButtons.forEach(btn => {
-        btn.addEventListener('click', () => handleModeChange(btn));
+    // Event listener
+    modeSelect.addEventListener('change', () => {
+        const newMode = modeSelect.value || null;
+        state.learningMode = newMode;
+        
+        if (newMode) {
+            localStorage.setItem('paideia_learning_mode', newMode);
+        } else {
+            localStorage.removeItem('paideia_learning_mode');
+        }
+        
+        // Log
+        const modeNames = {
+            '': 'Automático',
+            'concept': 'Concepto',
+            'practice': 'Práctica', 
+            'exercise_list': 'Lista de Ejercicios'
+        };
+        console.log(`🎯 Modo pedagógico: ${modeNames[modeSelect.value] || 'Automático'}`);
     });
-}
-
-function handleModeChange(clickedBtn) {
-    const modeButtons = document.querySelectorAll('.mode-btn');
-    
-    // Actualizar estado visual
-    modeButtons.forEach(btn => btn.classList.remove('active'));
-    clickedBtn.classList.add('active');
-    
-    // Actualizar estado y localStorage
-    const newMode = clickedBtn.dataset.mode || null; // '' se convierte en null (automático)
-    state.learningMode = newMode;
-    
-    if (newMode) {
-        localStorage.setItem('paideia_learning_mode', newMode);
-    } else {
-        localStorage.removeItem('paideia_learning_mode');
-    }
-    
-    // Feedback visual
-    const modeNames = {
-        '': 'Automático',
-        'concept': 'Concepto',
-        'practice': 'Práctica', 
-        'exercise_list': 'Lista de Ejercicios'
-    };
-    
-    console.log(`🎯 Modo pedagógico: ${modeNames[clickedBtn.dataset.mode] || 'Automático'}`);
 }
 
 // ==========================================
