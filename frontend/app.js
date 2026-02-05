@@ -128,13 +128,36 @@ function createMessageElement(message) {
             `;
         }
         
+        // Botones de feedback
+        const feedbackHtml = `
+            <div class="message-feedback" data-message-id="${message.id}">
+                <button class="feedback-btn" data-feedback="positive" title="Respuesta útil">
+                    👍
+                </button>
+                <button class="feedback-btn" data-feedback="negative" title="Respuesta no útil">
+                    👎
+                </button>
+            </div>
+        `;
+        
         div.innerHTML = `
             <div class="message-avatar">🎓</div>
             <div class="message-content">
                 <p>${formatMessage(message.content)}</p>
-                ${sourcesHtml}
+                <div class="message-footer">
+                    ${sourcesHtml}
+                    ${feedbackHtml}
+                </div>
             </div>
         `;
+        
+        // Agregar event listeners para feedback
+        setTimeout(() => {
+            const feedbackBtns = div.querySelectorAll('.feedback-btn');
+            feedbackBtns.forEach(btn => {
+                btn.addEventListener('click', () => handleFeedback(message.id, btn.dataset.feedback, btn));
+            });
+        }, 0);
     } else if (message.role === 'system') {
         div.className = `message system ${message.isError ? 'error' : ''}`;
         div.innerHTML = `
@@ -214,6 +237,51 @@ function loadChatHistory() {
     });
 
     scrollToBottom();
+}
+
+// ==========================================
+// Feedback
+// ==========================================
+
+async function handleFeedback(messageId, feedbackType, buttonElement) {
+    const feedbackContainer = buttonElement.closest('.message-feedback');
+    const allBtns = feedbackContainer.querySelectorAll('.feedback-btn');
+    
+    // Si ya se dio feedback, no hacer nada
+    if (feedbackContainer.classList.contains('submitted')) {
+        return;
+    }
+    
+    // Marcar como enviado visualmente
+    allBtns.forEach(btn => btn.classList.remove('selected'));
+    buttonElement.classList.add('selected');
+    feedbackContainer.classList.add('submitted');
+    
+    try {
+        const response = await fetch(`${API_BASE_URL}/feedback/explicit`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                query_id: messageId,
+                feedback_type: feedbackType === 'positive' ? 'helpful' : 'not_helpful',
+                rating: feedbackType === 'positive' ? 5 : 1,
+                student_id: state.studentId,
+                session_id: state.sessionId,
+            })
+        });
+        
+        if (!response.ok) {
+            throw new Error('Error enviando feedback');
+        }
+        
+        console.log(`✅ Feedback "${feedbackType}" enviado para mensaje ${messageId}`);
+        
+    } catch (error) {
+        console.error('Error enviando feedback:', error);
+        // Revertir estado visual en caso de error
+        feedbackContainer.classList.remove('submitted');
+        buttonElement.classList.remove('selected');
+    }
 }
 
 // ==========================================

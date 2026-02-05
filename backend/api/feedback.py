@@ -161,8 +161,8 @@ async def submit_explicit_feedback(
     # Crear señal
     signal = create_signal(
         signal_type=signal_type,
-        content_id=request.query_id,
-        student_id=x_student_id,
+        query_id=request.query_id,
+        student_id=x_student_id or "",
         raw_value=request.rating,
         metadata={
             "feedback_type": request.feedback_type.value,
@@ -186,8 +186,7 @@ async def submit_explicit_feedback(
     # Aplicar al grafo (si es posible)
     try:
         update = FeedbackGraphUpdate(
-            content_id=request.query_id,
-            signal=signal,
+            query_id=request.query_id,
         )
         await apply_feedback_to_graph(update, db)
     except Exception:
@@ -221,8 +220,8 @@ async def submit_implicit_feedback(
     # Crear señal
     signal = create_signal(
         signal_type=request.signal_type,
-        content_id=request.query_id,
-        student_id=x_student_id,
+        query_id=request.query_id,
+        student_id=x_student_id or "",
         raw_value=request.value,
         metadata=request.metadata,
     )
@@ -272,8 +271,8 @@ async def submit_batch_feedback(
         try:
             signal = create_signal(
                 signal_type=signal_req.signal_type,
-                content_id=signal_req.query_id,
-                student_id=x_student_id,
+                query_id=signal_req.query_id,
+                student_id=x_student_id or "",
                 raw_value=signal_req.value,
                 metadata=signal_req.metadata,
             )

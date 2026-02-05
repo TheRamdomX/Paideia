@@ -421,6 +421,72 @@ body {
     margin-bottom: 0.25rem;
 }
 
+/* Message Footer (sources + feedback) */
+.message-footer {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 1rem;
+    margin-top: 0.75rem;
+    padding-top: 0.75rem;
+    border-top: 1px solid var(--border-color);
+}
+
+.message-footer .message-sources {
+    margin-top: 0;
+    padding-top: 0;
+    border-top: none;
+    flex: 1;
+}
+
+/* Feedback Buttons */
+.message-feedback {
+    display: flex;
+    gap: 0.25rem;
+    flex-shrink: 0;
+}
+
+.feedback-btn {
+    background: none;
+    border: 1px solid var(--border-color);
+    border-radius: 0.5rem;
+    padding: 0.35rem 0.5rem;
+    cursor: pointer;
+    font-size: 0.9rem;
+    opacity: 0.6;
+    transition: all 0.2s;
+}
+
+.feedback-btn:hover {
+    opacity: 1;
+    background: var(--background);
+}
+
+.feedback-btn.selected {
+    opacity: 1;
+    border-color: var(--primary-color);
+    background: rgba(79, 70, 229, 0.1);
+}
+
+.feedback-btn[data-feedback="positive"].selected {
+    border-color: var(--success-color);
+    background: rgba(16, 185, 129, 0.1);
+}
+
+.feedback-btn[data-feedback="negative"].selected {
+    border-color: var(--error-color);
+    background: rgba(239, 68, 68, 0.1);
+}
+
+.message-feedback.submitted .feedback-btn:not(.selected) {
+    opacity: 0.3;
+    cursor: default;
+}
+
+.message-feedback.submitted .feedback-btn:not(.selected):hover {
+    background: none;
+}
+
 /* File upload message */
 .message.system {
     align-self: center;
