@@ -19,6 +19,7 @@ const state = {
     preferredProvider: localStorage.getItem('paideia_preferred_provider') || null,
     model: localStorage.getItem('paideia_model') || null,
     learningMode: localStorage.getItem('paideia_learning_mode') || null,  // null = automático
+    database: localStorage.getItem('paideia_database') || 'education',  // Base de datos activa
     isLoading: false,
     chatHistory: JSON.parse(localStorage.getItem('paideia_chat_history') || '[]'),
     documents: []  // Lista de documentos ingestados
@@ -82,6 +83,13 @@ const elements = {
     btnSaveUser: document.getElementById('btn-save-user'),
     btnClearUser: document.getElementById('btn-clear-user'),
     currentUserDisplay: document.getElementById('current-user-display'),
+    // Elementos de base de datos
+    databaseSelect: document.getElementById('database-select'),
+    btnNewDatabase: document.getElementById('btn-new-database'),
+    newDatabaseForm: document.getElementById('new-database-form'),
+    newDatabaseInput: document.getElementById('new-database-input'),
+    btnCreateDatabase: document.getElementById('btn-create-database'),
+    btnCancelDatabase: document.getElementById('btn-cancel-database'),
     // Elementos del modal de documentos
     btnDocuments: document.getElementById('btn-documents'),
     docsModal: document.getElementById('docs-modal'),
@@ -285,6 +293,102 @@ async function handleFeedback(messageId, feedbackType, buttonElement) {
 }
 
 // ==========================================
+// Database Management
+// ==========================================
+
+async function loadDatabases() {
+    try {
+        const response = await fetch(`${API_BASE_URL}/databases`);
+        if (!response.ok) throw new Error('Error cargando bases de datos');
+        
+        const data = await response.json();
+        // La API devuelve { databases: [{name, is_current}], current, namespace }
+        const databases = data.databases || [];
+        
+        // Limpiar y poblar el select
+        elements.databaseSelect.innerHTML = '';
+        databases.forEach(db => {
+            const option = document.createElement('option');
+            option.value = db.name;
+            option.textContent = db.name;
+            elements.databaseSelect.appendChild(option);
+        });
+        
+        // Seleccionar la base de datos actual
+        const current = data.current || state.database;
+        if (current) {
+            state.database = current;
+            elements.databaseSelect.value = current;
+            localStorage.setItem('paideia_database', current);
+        }
+        
+    } catch (error) {
+        console.error('Error cargando bases de datos:', error);
+    }
+}
+
+async function createDatabase(name) {
+    if (!name || !name.trim()) {
+        alert('Ingresa un nombre para la base de datos');
+        return;
+    }
+    
+    try {
+        const response = await fetch(`${API_BASE_URL}/databases`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: name.trim() })
+        });
+        
+        if (!response.ok) {
+            const error = await response.json();
+            throw new Error(error.detail || 'Error creando base de datos');
+        }
+        
+        // Limpiar input y ocultar formulario
+        elements.newDatabaseInput.value = '';
+        elements.newDatabaseForm.classList.add('hidden');
+        
+        // Recargar lista y seleccionar la nueva
+        await loadDatabases();
+        state.database = name.trim();
+        elements.databaseSelect.value = state.database;
+        
+        // Cambiar a la nueva base de datos
+        await switchDatabase(name.trim());
+        
+        console.log(`✅ Base de datos "${name.trim()}" creada`);
+        
+    } catch (error) {
+        console.error('Error creando base de datos:', error);
+        alert('Error creando base de datos: ' + error.message);
+    }
+}
+
+async function switchDatabase(dbName) {
+    try {
+        const response = await fetch(`${API_BASE_URL}/databases/switch`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ database: dbName })
+        });
+        
+        if (!response.ok) throw new Error('Error cambiando base de datos');
+        
+        state.database = dbName;
+        localStorage.setItem('paideia_database', dbName);
+        
+        console.log(`✅ Cambiado a base de datos: ${dbName}`);
+        
+        // Recargar documentos para la nueva base de datos
+        await loadDocumentsList();
+        
+    } catch (error) {
+        console.error('Error cambiando base de datos:', error);
+    }
+}
+
+// ==========================================
 // API Calls
 // ==========================================
 
@@ -313,6 +417,9 @@ async function sendQuery(question) {
     }
     if (state.model) {
         headers['X-Model'] = state.model;
+    }
+    if (state.database) {
+        headers['X-Database'] = state.database;
     }
 
     // Construir body con learning_mode opcional
@@ -357,6 +464,9 @@ async function uploadFile(file) {
     }
     if (state.googleKey) {
         headers['X-Google-Key'] = state.googleKey;
+    }
+    if (state.database) {
+        headers['X-Database'] = state.database;
     }
 
     const response = await fetch(`${API_BASE_URL}/ingest/file`, {
@@ -615,7 +725,12 @@ function resetUploadProgress() {
 
 async function loadDocumentsList() {
     try {
-        const response = await fetch(`${API_BASE_URL}/ingest/sources`);
+        const headers = {};
+        if (state.database) {
+            headers['X-Database'] = state.database;
+        }
+        
+        const response = await fetch(`${API_BASE_URL}/ingest/sources`, { headers });
         if (!response.ok) {
             throw new Error('Error cargando documentos');
         }
@@ -811,6 +926,9 @@ function init() {
     // Cargar lista de documentos inicial
     loadDocumentsList();
     
+    // Cargar lista de bases de datos
+    loadDatabases();
+    
     // Inicializar selector de modo
     initModeSelector();
 
@@ -824,6 +942,29 @@ function init() {
     elements.btnCloseModal.addEventListener('click', closeUserModal);
     elements.btnSaveUser.addEventListener('click', saveUser);
     elements.btnClearUser.addEventListener('click', clearUser);
+    
+    // Event listeners - Base de datos
+    elements.databaseSelect.addEventListener('change', (e) => {
+        switchDatabase(e.target.value);
+    });
+    elements.btnNewDatabase.addEventListener('click', () => {
+        elements.newDatabaseForm.classList.toggle('hidden');
+        if (!elements.newDatabaseForm.classList.contains('hidden')) {
+            elements.newDatabaseInput.focus();
+        }
+    });
+    elements.btnCreateDatabase.addEventListener('click', () => {
+        createDatabase(elements.newDatabaseInput.value);
+    });
+    elements.btnCancelDatabase.addEventListener('click', () => {
+        elements.newDatabaseForm.classList.add('hidden');
+        elements.newDatabaseInput.value = '';
+    });
+    elements.newDatabaseInput.addEventListener('keypress', (e) => {
+        if (e.key === 'Enter') {
+            createDatabase(elements.newDatabaseInput.value);
+        }
+    });
 
     // Event listeners - Modal de documentos
     elements.btnDocuments.addEventListener('click', openDocsModal);

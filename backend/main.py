@@ -13,6 +13,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from backend.api.databases import router as databases_router
 from backend.api.feedback import router as feedback_router
 from backend.api.ingest import router as ingest_router
 from backend.api.query import router as query_router
@@ -97,6 +98,7 @@ def create_app() -> FastAPI:
     app.include_router(query_router, prefix="/api/v1")
     app.include_router(ingest_router, prefix="/api/v1")
     app.include_router(feedback_router, prefix="/api/v1")
+    app.include_router(databases_router, prefix="/api/v1")
     
     # Registrar handlers de excepciones
     @app.exception_handler(Exception)

@@ -87,7 +87,6 @@
                     <!-- Sección de Identificación -->
                     <div class="config-section">
                         <h3>👤 Identificación</h3>
-                        <p>Tu ID de estudiante para personalizar la experiencia.</p>
                         <div class="input-group">
                             <label for="student-id-input">ID de Estudiante</label>
                             <input 
@@ -99,10 +98,37 @@
                         </div>
                     </div>
 
+                    <!-- Sección de Base de Datos -->
+                    <div class="config-section">
+                        <h3>🗄️ Espacio de Conocimiento</h3>
+                        <div class="input-group">
+                            <label for="database-select">Base de Datos</label>
+                            <div class="database-selector">
+                                <select id="database-select">
+                                    <option value="education">education (por defecto)</option>
+                                </select>
+                                <button id="btn-new-database" class="btn btn-sm" title="Crear nueva">+</button>
+                            </div>
+                        </div>
+                        <div id="new-database-form" class="input-group hidden">
+                            <label for="new-database-input">Nombre de la nueva base de datos</label>
+                            <div class="database-create-form">
+                                <input 
+                                    type="text" 
+                                    id="new-database-input" 
+                                    placeholder="mi_curso"
+                                    pattern="[a-zA-Z][a-zA-Z0-9_]*"
+                                    autocomplete="off"
+                                >
+                                <button id="btn-create-database" class="btn btn-primary btn-sm">Crear</button>
+                                <button id="btn-cancel-database" class="btn btn-secondary btn-sm">Cancelar</button>
+                            </div>
+                        </div>
+                    </div>
+
                     <!-- Sección de API Keys -->
                     <div class="config-section">
                         <h3>🔑 API Keys (Opcional)</h3>
-                        <p>Puedes usar tus propias API keys. Si no las configuras, se usarán las del servidor (si están disponibles).</p>
                         
                         <div class="input-group">
                             <label for="openai-key-input">

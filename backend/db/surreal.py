@@ -18,11 +18,14 @@ class SurrealDBClient:
     """
     Cliente singleton para SurrealDB.
     Maneja conexión, queries y transacciones.
+    Soporta cambio dinámico de database.
     """
     
     _instance: Optional["SurrealDBClient"] = None
     _client: Optional[AsyncSurreal] = None
     _connected: bool = False
+    _current_namespace: str = ""
+    _current_database: str = ""
     
     def __new__(cls) -> "SurrealDBClient":
         if cls._instance is None:
@@ -33,6 +36,16 @@ class SurrealDBClient:
     def is_connected(self) -> bool:
         """Verifica si hay conexión activa."""
         return self._connected and self._client is not None
+    
+    @property
+    def current_database(self) -> str:
+        """Devuelve la base de datos actual."""
+        return self._current_database
+    
+    @property
+    def current_namespace(self) -> str:
+        """Devuelve el namespace actual."""
+        return self._current_namespace
     
     async def connect(self) -> None:
         """
@@ -58,12 +71,91 @@ class SurrealDBClient:
             
             # Seleccionar namespace y database
             await self._client.use(config["namespace"], config["database"])
+            self._current_namespace = config["namespace"]
+            self._current_database = config["database"]
             
             self._connected = True
             
         except Exception as e:
             self._connected = False
             raise ConnectionError(f"Error conectando a SurrealDB: {e}") from e
+    
+    async def use_database(self, database: str, namespace: Optional[str] = None) -> None:
+        """
+        Cambia a otra base de datos.
+        
+        Args:
+            database: Nombre de la base de datos
+            namespace: Namespace (opcional, usa el actual si no se especifica)
+        """
+        if not self.is_connected:
+            await self.connect()
+        
+        ns = namespace or self._current_namespace
+        
+        try:
+            await self._client.use(ns, database)
+            self._current_namespace = ns
+            self._current_database = database
+        except Exception as e:
+            raise RuntimeError(f"Error cambiando a database {database}: {e}") from e
+    
+    async def list_databases(self) -> List[str]:
+        """
+        Lista las bases de datos disponibles en el namespace actual.
+        
+        Returns:
+            Lista de nombres de bases de datos
+        """
+        if not self.is_connected:
+            await self.connect()
+        
+        try:
+            result = await self._client.query("INFO FOR NS;")
+            
+            # Extraer databases del resultado
+            # El resultado puede venir en diferentes formatos según la versión
+            if result:
+                # Si es dict directo
+                if isinstance(result, dict):
+                    dbs = result.get("databases") or {}
+                    if isinstance(dbs, dict):
+                        return list(dbs.keys())
+                # Si es lista
+                elif isinstance(result, list):
+                    for r in result:
+                        if isinstance(r, dict):
+                            # Formato: {"result": {"databases": {...}}} o {"databases": {...}}
+                            data = r.get("result", r)
+                            if isinstance(data, dict):
+                                dbs = data.get("databases") or data.get("db") or {}
+                                if isinstance(dbs, dict):
+                                    return list(dbs.keys())
+            
+            return [self._current_database] if self._current_database else []
+        except Exception as e:
+            print(f"Error listing databases: {e}")
+            return [self._current_database] if self._current_database else []
+    
+    async def create_database(self, database: str) -> bool:
+        """
+        Crea una nueva base de datos.
+        
+        Args:
+            database: Nombre de la base de datos a crear
+            
+        Returns:
+            True si se creó exitosamente
+        """
+        if not self.is_connected:
+            await self.connect()
+        
+        try:
+            # Crear database usando USE (la crea si no existe)
+            await self._client.query(f"DEFINE DATABASE {database};")
+            return True
+        except Exception as e:
+            raise RuntimeError(f"Error creando database {database}: {e}") from e
     
     async def disconnect(self) -> None:
         """Cierra la conexión con SurrealDB."""
@@ -329,3 +421,51 @@ async def close() -> None:
     if _db_client and _db_client.is_connected:
         await _db_client.disconnect()
         _db_client = None
+
+
+async def switch_database(database: str) -> None:
+    """
+    Cambia a una base de datos diferente.
+    
+    Args:
+        database: Nombre de la base de datos
+    """
+    db = await get_db()
+    await db.use_database(database)
+
+
+async def list_databases() -> List[str]:
+    """
+    Lista las bases de datos disponibles.
+    
+    Returns:
+        Lista de nombres de bases de datos
+    """
+    db = await get_db()
+    return await db.list_databases()
+
+
+async def create_database(database: str) -> bool:
+    """
+    Crea una nueva base de datos.
+    
+    Args:
+        database: Nombre de la base de datos a crear
+        
+    Returns:
+        True si se creó exitosamente
+    """
+    db = await get_db()
+    return await db.create_database(database)
+
+
+def get_current_database() -> str:
+    """
+    Obtiene el nombre de la base de datos actual.
+    
+    Returns:
+        Nombre de la base de datos actual
+    """
+    if _db_client and _db_client.is_connected:
+        return _db_client.current_database
+    return ""

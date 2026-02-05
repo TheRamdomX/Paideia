@@ -10,7 +10,8 @@ from contextlib import asynccontextmanager
 from functools import lru_cache
 from typing import Any, AsyncGenerator, Dict, Optional, Type
 
-from backend.db.surreal import get_db as get_surreal_db, connect, close, execute
+from fastapi import Header
+from backend.db.surreal import get_db as get_surreal_db, connect, close, execute, switch_database
 from backend.models.embeddings import (
     BaseEmbedding,
     get_embedding_model,
@@ -48,9 +49,15 @@ def get_settings() -> Settings:
 # Dependencias de Base de Datos
 # ==========================================
 
-async def get_db() -> AsyncGenerator[Any, None]:
+async def get_db(
+    x_database: Optional[str] = Header(None, alias="X-Database")
+) -> AsyncGenerator[Any, None]:
     """
     Dependencia para obtener conexión a la base de datos.
+    Puede cambiar la base de datos activa según el header X-Database.
+    
+    Args:
+        x_database: Nombre de la base de datos a usar (opcional)
     
     Yields:
         Conexión a SurrealDB
@@ -67,6 +74,10 @@ async def get_db() -> AsyncGenerator[Any, None]:
     
     if _db_connection is None:
         _db_connection = await get_surreal_db()
+    
+    # Cambiar base de datos si se especifica en el header
+    if x_database:
+        await switch_database(x_database)
     
     try:
         yield _db_connection

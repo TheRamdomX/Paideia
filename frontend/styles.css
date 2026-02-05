@@ -127,6 +127,11 @@ body {
     z-index: 1000;
 }
 
+/* Generic hidden class */
+.hidden {
+    display: none !important;
+}
+
 .modal.hidden {
     display: none;
 }
@@ -238,6 +243,37 @@ body {
 .input-group input[type="password"] {
     font-family: monospace;
     letter-spacing: 0.1em;
+}
+
+/* Database Selector */
+.database-selector {
+    display: flex;
+    gap: 0.5rem;
+}
+
+.database-selector select {
+    flex: 1;
+}
+
+.database-selector .btn-sm {
+    padding: 0.5rem 0.75rem;
+    font-size: 1.1rem;
+    line-height: 1;
+}
+
+.database-create-form {
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+}
+
+.database-create-form input {
+    flex: 1;
+}
+
+.database-create-form .btn-sm {
+    padding: 0.5rem 0.75rem;
+    white-space: nowrap;
 }
 
 .modal-actions {
