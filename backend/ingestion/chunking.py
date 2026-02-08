@@ -30,8 +30,8 @@ class Chunk:
     metadata: Dict[str, Any] = field(default_factory=dict)
     
     # Información de posición
-    start_char: int = 0
-    end_char: int = 0
+    start_char: Optional[int] = None
+    end_char: Optional[int] = None
     
     def __post_init__(self):
         if self.content and self.token_count == 0:
@@ -202,7 +202,7 @@ def hierarchical_chunk(
     
     # Configuración de tamaños
     child_size = child_chunk_size or config["chunk_size"]
-    parent_size = parent_chunk_size or (child_size * 2)
+    _ = parent_chunk_size or (child_size * 2)  # Compatibilidad de firma
     overlap = chunk_overlap or config["chunk_overlap"]
     
     if not text or not text.strip():
@@ -222,36 +222,40 @@ def hierarchical_chunk(
     child_chunks: List[Chunk] = []
     
     global_index = 0
-    char_position = 0
+
+    base_metadata = dict(metadata or {})
+    if "page" not in base_metadata and "page_number" in base_metadata:
+        base_metadata["page"] = base_metadata["page_number"]
     
     for section in sections:
         section_tokens = token_count(section)
         
         # Si la sección es pequeña, es un chunk hijo directo
         if section_tokens <= child_size:
+            chunk_metadata = dict(base_metadata)
+            chunk_metadata["chunk_level"] = 1
+            chunk_metadata["approximate_offsets"] = True
             chunk = Chunk(
                 content=section.strip(),
                 index=global_index,
                 level=1,
-                metadata=metadata or {},
-                start_char=char_position,
-                end_char=char_position + len(section),
+                metadata=chunk_metadata,
             )
             all_chunks.append(chunk)
             child_chunks.append(chunk)
             global_index += 1
-            char_position += len(section)
             continue
         
         # Crear chunk padre
-        parent_content = section[:parent_size * 4] if len(section) > parent_size * 4 else section
+        parent_content = section
+        parent_metadata = dict(base_metadata)
+        parent_metadata["chunk_level"] = 0
+        parent_metadata["approximate_offsets"] = True
         parent_chunk = Chunk(
             content=parent_content.strip(),
             index=global_index,
             level=0,
-            metadata=metadata or {},
-            start_char=char_position,
-            end_char=char_position + len(parent_content),
+            metadata=parent_metadata,
         )
         parent_chunks.append(parent_chunk)
         all_chunks.append(parent_chunk)
@@ -264,26 +268,22 @@ def hierarchical_chunk(
             overlap=overlap
         )
         
-        local_char_pos = char_position
-        
         for child_text in child_texts:
+            child_metadata = dict(base_metadata)
+            child_metadata["chunk_level"] = 1
+            child_metadata["approximate_offsets"] = True
             child_chunk = Chunk(
                 content=child_text.strip(),
                 index=global_index,
                 level=1,
                 parent_id=parent_chunk.id,
-                metadata=metadata or {},
-                start_char=local_char_pos,
-                end_char=local_char_pos + len(child_text),
+                metadata=child_metadata,
             )
             
             parent_chunk.children_ids.append(child_chunk.id)
             all_chunks.append(child_chunk)
             child_chunks.append(child_chunk)
             global_index += 1
-            local_char_pos += len(child_text) - (overlap * 4)  # Aproximación
-        
-        char_position += len(section)
     
     return ChunkingResult(
         chunks=all_chunks,
@@ -381,19 +381,21 @@ def simple_chunk(
     chunk_texts = create_overlapping_chunks(text, size, overlap)
     
     chunks = []
-    char_pos = 0
+    base_metadata = dict(metadata or {})
+    if "page" not in base_metadata and "page_number" in base_metadata:
+        base_metadata["page"] = base_metadata["page_number"]
     
     for i, chunk_text in enumerate(chunk_texts):
+        chunk_metadata = dict(base_metadata)
+        chunk_metadata["chunk_level"] = 0
+        chunk_metadata["approximate_offsets"] = True
         chunk = Chunk(
             content=chunk_text,
             index=i,
             level=0,
-            metadata=metadata or {},
-            start_char=char_pos,
-            end_char=char_pos + len(chunk_text),
+            metadata=chunk_metadata,
         )
         chunks.append(chunk)
-        char_pos += len(chunk_text) - (overlap * 4)
     
     return ChunkingResult(
         chunks=chunks,
