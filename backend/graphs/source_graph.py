@@ -7,9 +7,12 @@ Orquesta el flujo completo desde contenido raw hasta grafo de conocimiento.
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
+from pathlib import Path
+from time import time
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
@@ -38,11 +41,24 @@ from backend.ingestion.vectorizer import (
     embed_chunks_batch,
     submit_vectorization,
 )
+from backend.ingestion.ocr import (
+    OCRResult,
+    is_pdf,
+    is_image,
+    is_text_file,
+    pdf_has_text,
+    extract_native_pdf_text,
+    run_ocr,
+    read_text_file,
+)
+
+logger = logging.getLogger(__name__)
 
 
 class IngestionStatus(str, Enum):
     """Estados del proceso de ingestión."""
     PENDING = "pending"
+    OCR_PROCESSING = "ocr_processing"
     PROCESSING = "processing"
     CHUNKING = "chunking"
     VECTORIZING = "vectorizing"
@@ -58,6 +74,11 @@ class IngestionState:
     id: str = field(default_factory=lambda: str(uuid4()))
     status: IngestionStatus = IngestionStatus.PENDING
     source_id: Optional[str] = None
+    
+    # OCR - Nuevo
+    file_path: Optional[str] = None
+    raw_content: Optional[str] = None
+    ocr_result: Optional[OCRResult] = None
     
     # Contenido
     processed_content: Optional[ProcessedContent] = None
@@ -90,12 +111,112 @@ class IngestionState:
             "completed_at": self.completed_at.isoformat() if self.completed_at else None,
             "error": self.error,
             "metadata": self.metadata,
+            "ocr_applied": self.metadata.get("ocr", False),
         }
 
 
 # ==========================================
 # Nodos del Grafo de Ingestión
 # ==========================================
+
+async def ocr_process(
+    state: IngestionState,
+    file_path: Optional[str] = None,
+    lang: str = "spa"
+) -> IngestionState:
+    """
+    Nodo: Procesa archivos mediante OCR si es necesario.
+    
+    Este nodo es INDEPENDIENTE del pipeline RAG, permitiendo:
+    - Cambiar motores OCR sin afectar RAG
+    - Usar OCR confidence
+    - Reprocesar sin LLM
+    - Versionar raw_text
+    
+    Args:
+        state: Estado actual del pipeline
+        file_path: Path al archivo a procesar
+        lang: Idioma para OCR (default: español)
+        
+    Returns:
+        Estado actualizado con raw_content
+    """
+    state.status = IngestionStatus.OCR_PROCESSING
+    start_time = time()
+    
+    # Guardar file_path en el estado
+    if file_path:
+        state.file_path = file_path
+    
+    path = state.file_path
+    
+    # Si no hay archivo, no hay nada que hacer con OCR
+    if not path:
+        logger.debug("No hay file_path, saltando OCR")
+        return state
+    
+    try:
+        if is_pdf(path):
+            # Verificar si el PDF tiene texto nativo
+            if not pdf_has_text(path):
+                # PDF escaneado - aplicar OCR
+                logger.info(f"PDF escaneado detectado: {path}")
+                
+                ocr_result = run_ocr(path, lang=lang)
+                state.ocr_result = ocr_result
+                state.raw_content = ocr_result.text
+                state.metadata["ocr"] = True
+                state.metadata["ocr_info"] = ocr_result.to_dict()
+                
+                logger.info(
+                    f"OCR aplicado: pages={ocr_result.pages_processed}, "
+                    f"confidence={ocr_result.confidence}, "
+                    f"duration={ocr_result.duration_seconds:.2f}s"
+                )
+            else:
+                # PDF digital - extraer texto nativo
+                logger.info(f"PDF digital detectado: {path}")
+                state.raw_content = extract_native_pdf_text(path)
+                state.metadata["ocr"] = False
+                
+        elif is_image(path):
+            # Imagen - OCR directo
+            logger.info(f"Imagen detectada para OCR: {path}")
+            
+            ocr_result = run_ocr(path, lang=lang)
+            state.ocr_result = ocr_result
+            state.raw_content = ocr_result.text
+            state.metadata["ocr"] = True
+            state.metadata["ocr_info"] = ocr_result.to_dict()
+            
+        elif is_text_file(path):
+            # Archivo de texto - leer directamente
+            logger.debug(f"Archivo de texto: {path}, saltando OCR")
+            state.raw_content = read_text_file(path)
+            state.metadata["ocr"] = False
+            
+        else:
+            # Otros tipos - intentar leer como texto
+            logger.debug(f"Tipo de archivo desconocido: {path}, intentando leer como texto")
+            try:
+                state.raw_content = read_text_file(path)
+                state.metadata["ocr"] = False
+            except Exception as e:
+                logger.warning(f"No se pudo leer archivo: {e}")
+                # Dejar que content_process maneje este caso
+                
+    except Exception as e:
+        logger.error(f"Error en OCR process: {e}")
+        state.error = f"Error en procesamiento OCR: {e}"
+        state.status = IngestionStatus.FAILED
+        return state
+    
+    duration = time() - start_time
+    state.metadata["ocr_process_duration"] = duration
+    logger.info(f"OCR process completado: ocr_applied={state.metadata.get('ocr', False)}, duration={duration:.2f}s")
+    
+    return state
+
 
 async def content_process(
     state: IngestionState,
@@ -107,6 +228,9 @@ async def content_process(
 ) -> IngestionState:
     """
     Nodo: Procesa y normaliza el contenido.
+    
+    Si state.raw_content ya está disponible (desde OCR), lo usa directamente.
+    De lo contrario, procesa desde file_path, url o content.
     
     Args:
         state: Estado actual del pipeline
@@ -122,13 +246,31 @@ async def content_process(
     state.status = IngestionStatus.PROCESSING
     
     try:
-        processed = await process_content(
-            content=content,
-            file_path=file_path,
-            url=url,
-            title=title,
-            metadata=metadata
-        )
+        # Si OCR ya procesó el contenido, usarlo directamente
+        # IMPORTANTE: No pasar file_path cuando ya tenemos raw_content,
+        # porque process_content prioriza file_path sobre content
+        if state.raw_content:
+            logger.info("Usando raw_content del procesamiento OCR")
+            processed = await process_content(
+                content=state.raw_content,
+                # No pasar file_path aquí, ya tenemos el contenido extraído
+                file_path=None,
+                url=url,
+                title=title or (Path(state.file_path).stem.replace("_", " ").replace("-", " ").title() if state.file_path else None),
+                metadata=metadata,
+            )
+            # Preservar el file_path original en los metadatos
+            if state.file_path:
+                processed.file_path = state.file_path
+        else:
+            # Procesamiento normal (sin OCR previo)
+            processed = await process_content(
+                content=content,
+                file_path=file_path,
+                url=url,
+                title=title,
+                metadata=metadata,
+            )
         
         # Validar contenido
         is_valid, error = validate_content(processed)
@@ -138,6 +280,12 @@ async def content_process(
             return state
         
         state.processed_content = processed
+        
+        # Persistir OCR raw_text para reprocesamiento futuro
+        if state.raw_content:
+            state.processed_content.metadata["raw_text"] = state.raw_content
+            state.processed_content.metadata["ocr"] = state.metadata.get("ocr", False)
+        
         state.metadata.update({
             "content_type": processed.content_type.value,
             "word_count": processed.word_count,
@@ -421,6 +569,8 @@ async def run_source_graph(
     metadata: Optional[Dict[str, Any]] = None,
     run_transformations: bool = True,
     skip_vectorization: bool = False,
+    skip_ocr: bool = False,
+    ocr_lang: str = "spa",
     user_openai_key: Optional[str] = None,
     user_google_key: Optional[str] = None,
 ) -> Dict[str, Any]:
@@ -428,8 +578,11 @@ async def run_source_graph(
     Ejecuta el pipeline completo de ingestión.
     
     Este es el punto de entrada principal para ingestar contenido.
-    Orquesta todos los pasos: procesamiento, chunking, vectorización
+    Orquesta todos los pasos: OCR, procesamiento, chunking, vectorización
     y transformaciones.
+    
+    Flujo del pipeline:
+    Upload → OCR → Content Process → Chunk → Embed → Transform
     
     Args:
         content: Contenido como texto
@@ -439,6 +592,8 @@ async def run_source_graph(
         metadata: Metadatos adicionales
         run_transformations: Si ejecutar transformaciones de grafos
         skip_vectorization: Si saltar vectorización
+        skip_ocr: Si saltar procesamiento OCR
+        ocr_lang: Idioma para OCR (default: español)
         user_openai_key: API key de OpenAI del cliente
         user_google_key: API key de Google del cliente
         
@@ -452,6 +607,17 @@ async def run_source_graph(
     state.metadata["_user_google_key"] = user_google_key
     
     try:
+        # Paso 0: OCR (si hay archivo)
+        if file_path and not skip_ocr:
+            state = await ocr_process(
+                state=state,
+                file_path=file_path,
+                lang=ocr_lang,
+            )
+            
+            if state.status == IngestionStatus.FAILED:
+                return state.to_dict()
+        
         # Paso 1: Procesar contenido
         state = await content_process(
             state=state,

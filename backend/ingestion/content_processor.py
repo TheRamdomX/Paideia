@@ -13,6 +13,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 from urllib.parse import urlparse
+from pypdf import PdfReader
 
 from backend.utils.text import clean_markdown, normalize_text
 
@@ -314,9 +315,7 @@ async def process_pdf_content(file_path: str) -> str:
         Requiere pypdf instalado. Si no está disponible,
         retorna un mensaje indicando que se necesita la librería.
     """
-    try:
-        from pypdf import PdfReader
-        
+    try:        
         reader = PdfReader(file_path)
         text_parts = []
         

@@ -405,6 +405,23 @@ backend/ingestion/content_processor.py
   def process_content
   def validate_content
 
+backend/ingestion/ocr.py
+  class OCRResult
+  def to_dict
+  def is_pdf
+  def is_image
+  def is_text_file
+  def pdf_has_text
+  def extract_native_pdf_text
+  def get_pdf_page_count
+  def rasterize_pdf
+  def ocr_image
+  def ocr_image_from_path
+  def run_ocr
+  def read_text_file
+  def check_tesseract_installed
+  def get_available_languages
+
 backend/ingestion/vectorizer.py
   class VectorizationStatus
   class VectorizationJob
