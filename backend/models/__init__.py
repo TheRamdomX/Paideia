@@ -25,6 +25,21 @@ from backend.models.embeddings import (
     select_embedding_model,
 )
 
+from backend.models.model_limits import (
+    ModelConfig,
+    OPENAI_MODELS,
+    GOOGLE_MODELS,
+    ALL_MODELS,
+    get_model_config as get_model_limits,
+    get_context_window,
+    get_max_output_tokens,
+    get_safe_context_limit,
+    list_models_by_provider,
+    get_models_summary,
+    validate_token_count,
+    get_default_model,
+)
+
 __all__ = [
     # LLM
     "BaseLLM",
@@ -44,4 +59,17 @@ __all__ = [
     "get_embedding_model",
     "get_embedding_dimension",
     "select_embedding_model",
+    # Model Limits
+    "ModelConfig",
+    "OPENAI_MODELS",
+    "GOOGLE_MODELS",
+    "ALL_MODELS",
+    "get_model_limits",
+    "get_context_window",
+    "get_max_output_tokens",
+    "get_safe_context_limit",
+    "list_models_by_provider",
+    "get_models_summary",
+    "validate_token_count",
+    "get_default_model",
 ]

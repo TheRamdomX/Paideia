@@ -245,6 +245,23 @@ body {
     letter-spacing: 0.1em;
 }
 
+/* Input hints */
+.input-hint {
+    display: block;
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+    margin-top: 0.35rem;
+}
+
+.input-hint a {
+    color: var(--primary-color);
+    text-decoration: none;
+}
+
+.input-hint a:hover {
+    text-decoration: underline;
+}
+
 /* Database Selector */
 .database-selector {
     display: flex;

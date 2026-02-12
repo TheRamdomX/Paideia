@@ -50,7 +50,7 @@ class Settings(BaseSettings):
     
     # Google (Gemini/Gemma)
     google_api_key: Optional[str] = Field(default=None, description="API Key de Google AI")
-    google_model: str = Field(default="gemma-3-27b-it", description="Modelo de Google")
+    google_model: str = Field(default="gemini-2.0-flash", description="Modelo de Google")
     google_embedding_model: str = Field(
         default="gemini-embedding-001",
         description="Modelo de embeddings de Google"
@@ -81,7 +81,10 @@ class Settings(BaseSettings):
     # ==========================================
     chunk_size: int = Field(default=512, description="Tamaño de chunk en tokens")
     chunk_overlap: int = Field(default=50, description="Solapamiento entre chunks")
-    max_context_tokens: int = Field(default=4096, description="Máximo de tokens de contexto")
+    max_context_tokens: int = Field(
+        default=0,  # 0 = usar límite dinámico según modelo
+        description="Máximo de tokens de contexto (0 = dinámico según modelo)"
+    )
     similarity_threshold: float = Field(
         default=0.7,
         description="Umbral mínimo de similitud para retrieval"
@@ -91,7 +94,10 @@ class Settings(BaseSettings):
     # Model Parameters
     # ==========================================
     llm_temperature: float = Field(default=0.7, description="Temperatura del LLM")
-    llm_max_tokens: int = Field(default=2048, description="Máximo de tokens de salida")
+    llm_max_tokens: int = Field(
+        default=0,  # 0 = usar límite del modelo
+        description="Máximo de tokens de salida (0 = usar límite del modelo)"
+    )
     
     # ==========================================
     # Feature Flags
@@ -144,6 +150,28 @@ def get_settings() -> Settings:
     return Settings()
 
 
+def _get_model_max_tokens(model: str, configured_max: int) -> int:
+    """
+    Obtiene el max_tokens a usar, considerando límites del modelo.
+    
+    Args:
+        model: Nombre del modelo
+        configured_max: Valor configurado (0 = usar límite del modelo)
+        
+    Returns:
+        max_tokens a usar
+    """
+    if configured_max > 0:
+        return configured_max
+    
+    # Importar aquí para evitar circular import
+    try:
+        from backend.models.model_limits import get_max_output_tokens
+        return min(4096, get_max_output_tokens(model, default=4096))
+    except ImportError:
+        return 4096
+
+
 def get_model_config() -> dict:
     """
     Devuelve la configuración del modelo LLM activo.
@@ -154,25 +182,27 @@ def get_model_config() -> dict:
             - model: Nombre del modelo
             - api_key: API key del proveedor
             - temperature: Temperatura
-            - max_tokens: Máximo de tokens
+            - max_tokens: Máximo de tokens (dinámico según modelo si es 0)
     """
     settings = get_settings()
     
     if settings.llm_provider == LLMProvider.OPENAI:
+        model = settings.openai_model
         return {
             "provider": LLMProvider.OPENAI,
-            "model": settings.openai_model,
+            "model": model,
             "api_key": settings.openai_api_key,
             "temperature": settings.llm_temperature,
-            "max_tokens": settings.llm_max_tokens,
+            "max_tokens": _get_model_max_tokens(model, settings.llm_max_tokens),
         }
     elif settings.llm_provider == LLMProvider.GOOGLE:
+        model = settings.google_model
         return {
             "provider": LLMProvider.GOOGLE,
-            "model": settings.google_model,
+            "model": model,
             "api_key": settings.google_api_key,
             "temperature": settings.llm_temperature,
-            "max_tokens": settings.llm_max_tokens,
+            "max_tokens": _get_model_max_tokens(model, settings.llm_max_tokens),
         }
     else:
         raise ValueError(f"Proveedor LLM no soportado: {settings.llm_provider}")

@@ -12,9 +12,11 @@ from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
 
 from backend.agents.mode_router import LearningMode
-from backend.agents.reasoning_agent import GeneratedAnswer, PromptConfig
+from backend.agents.reasoning_agent import GeneratedAnswer, PromptConfig, _get_default_context_limit
+from backend.models.model_limits import get_safe_context_limit
 from backend.retrieval.hybrid_ranker import RankedResult
 from backend.utils.text import token_count
+from backend.settings import get_settings
 
 
 # ==========================================
@@ -630,6 +632,7 @@ def get_retry_adjustments(
         include_examples=current_config.include_examples,
         include_sources=current_config.include_sources,
         language=current_config.language,
+        model=current_config.model,
     )
     
     retrieval_adjustments: Dict[str, Any] = {
@@ -637,6 +640,9 @@ def get_retry_adjustments(
         "force_mode": None,
         "expand_graph": False,
     }
+    
+    # Obtener límite máximo del modelo para los ajustes
+    base_context_limit = _get_default_context_limit(current_config.model)
     
     # Ajustar según decisión
     if evaluation.decision == ReflectionDecision.MODE_MISMATCH:
@@ -649,13 +655,17 @@ def get_retry_adjustments(
             retrieval_adjustments["expand_graph"] = True
             
     elif evaluation.decision == ReflectionDecision.EXPAND:
-        new_config.max_context_tokens = min(5000, current_config.max_context_tokens + 1000)
+        # Incrementar contexto en 25%, respetando el límite del modelo
+        new_limit = int(current_config.max_context_tokens * 1.25)
+        new_config.max_context_tokens = min(base_context_limit, new_limit)
         
     elif evaluation.decision == ReflectionDecision.SIMPLIFY:
         new_config.include_examples = True
         
     elif evaluation.decision == ReflectionDecision.REQUEST_MORE_CONTEXT:
-        new_config.max_context_tokens = min(6000, current_config.max_context_tokens + 2000)
+        # Incrementar contexto en 50%, respetando el límite del modelo
+        new_limit = int(current_config.max_context_tokens * 1.5)
+        new_config.max_context_tokens = min(base_context_limit, new_limit)
         retrieval_adjustments["expand_graph"] = True
     
     # Si cobertura es baja, pedir más ejemplos

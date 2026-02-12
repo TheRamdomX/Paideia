@@ -83,6 +83,11 @@ const elements = {
     btnSaveUser: document.getElementById('btn-save-user'),
     btnClearUser: document.getElementById('btn-clear-user'),
     currentUserDisplay: document.getElementById('current-user-display'),
+    // Secciones dinámicas de API keys y modelo
+    openaiKeySection: document.getElementById('openai-key-section'),
+    googleKeySection: document.getElementById('google-key-section'),
+    modelSection: document.getElementById('model-section'),
+    modelInfo: document.getElementById('model-info'),
     // Elementos de base de datos
     databaseSelect: document.getElementById('database-select'),
     btnNewDatabase: document.getElementById('btn-new-database'),
@@ -105,6 +110,126 @@ const elements = {
     btnRefreshDocs: document.getElementById('btn-refresh-docs'),
     docsCountBadge: document.getElementById('docs-count-badge')
 };
+
+// Cache de modelos del backend
+let cachedModels = {
+    openai: [],
+    google: [],
+    loaded: false
+};
+
+// ==========================================
+// Modelos Dinámicos
+// ==========================================
+
+async function loadModelsFromBackend() {
+    if (cachedModels.loaded) return;
+    
+    try {
+        const response = await fetch(`${API_BASE_URL}/models`);
+        if (!response.ok) throw new Error('Error cargando modelos');
+        
+        const data = await response.json();
+        
+        // Separar por proveedor
+        cachedModels.openai = data.models.filter(m => m.provider === 'openai');
+        cachedModels.google = data.models.filter(m => m.provider === 'google');
+        cachedModels.loaded = true;
+        
+        console.log(`✅ Modelos cargados: ${cachedModels.openai.length} OpenAI, ${cachedModels.google.length} Google`);
+        
+    } catch (error) {
+        console.error('Error cargando modelos:', error);
+        // Usar fallback con modelos básicos
+        cachedModels.openai = [
+            { api_name: 'gpt-4o-mini', name: 'GPT-4o Mini', context_window: 128000 },
+            { api_name: 'gpt-4o', name: 'GPT-4o', context_window: 128000 },
+        ];
+        cachedModels.google = [
+            { api_name: 'gemini-2.0-flash', name: 'Gemini 2.0 Flash', context_window: 1000000 },
+            { api_name: 'gemini-1.5-flash', name: 'Gemini 1.5 Flash', context_window: 1000000 },
+        ];
+        cachedModels.loaded = true;
+    }
+}
+
+function updateModelsForProvider(provider) {
+    const models = provider === 'openai' ? cachedModels.openai : 
+                   provider === 'google' ? cachedModels.google : [];
+    
+    elements.modelSelect.innerHTML = '';
+    
+    if (models.length === 0) {
+        elements.modelSelect.innerHTML = '<option value="">No hay modelos disponibles</option>';
+        return;
+    }
+    
+    // Opción por defecto
+    const defaultOpt = document.createElement('option');
+    defaultOpt.value = '';
+    defaultOpt.textContent = '-- Selecciona un modelo --';
+    elements.modelSelect.appendChild(defaultOpt);
+    
+    // Agregar modelos
+    models.forEach(model => {
+        const option = document.createElement('option');
+        option.value = model.api_name;
+        // Formato: nombre (contexto)
+        const contextK = Math.round(model.context_window / 1000);
+        option.textContent = `${model.name} (${contextK}K contexto)`;
+        option.dataset.contextWindow = model.context_window;
+        elements.modelSelect.appendChild(option);
+    });
+    
+    // Si había un modelo guardado de este proveedor, seleccionarlo
+    if (state.model && models.some(m => m.api_name === state.model)) {
+        elements.modelSelect.value = state.model;
+        updateModelInfo(state.model, models);
+    }
+}
+
+function updateModelInfo(modelName, models) {
+    const model = models.find(m => m.api_name === modelName);
+    if (model && elements.modelInfo) {
+        const contextK = Math.round(model.context_window / 1000);
+        elements.modelInfo.textContent = `Ventana de contexto: ${contextK}K tokens`;
+    } else if (elements.modelInfo) {
+        elements.modelInfo.textContent = '';
+    }
+}
+
+function handleProviderChange() {
+    const provider = elements.preferredProviderSelect.value;
+    
+    // Ocultar todo primero
+    elements.openaiKeySection.classList.add('hidden');
+    elements.googleKeySection.classList.add('hidden');
+    elements.modelSection.classList.add('hidden');
+    
+    if (!provider) {
+        return;
+    }
+    
+    // Mostrar sección de API key según proveedor
+    if (provider === 'openai') {
+        elements.openaiKeySection.classList.remove('hidden');
+    } else if (provider === 'google') {
+        elements.googleKeySection.classList.remove('hidden');
+    }
+    
+    // Mostrar selector de modelos
+    elements.modelSection.classList.remove('hidden');
+    
+    // Actualizar modelos disponibles
+    updateModelsForProvider(provider);
+}
+
+function handleModelSelectChange() {
+    const provider = elements.preferredProviderSelect.value;
+    const modelName = elements.modelSelect.value;
+    const models = provider === 'openai' ? cachedModels.openai : cachedModels.google;
+    updateModelInfo(modelName, models);
+}
 
 // ==========================================
 // Renderizado de Mensajes
@@ -560,13 +685,28 @@ function autoResizeTextarea() {
 // User Modal
 // ==========================================
 
-function openUserModal() {
+async function openUserModal() {
     elements.userModal.classList.remove('hidden');
+    
+    // Cargar modelos del backend si no están cargados
+    await loadModelsFromBackend();
+    
+    // Restaurar valores guardados
     elements.studentIdInput.value = state.studentId || '';
     elements.openaiKeyInput.value = state.openaiKey || '';
     elements.googleKeyInput.value = state.googleKey || '';
     elements.preferredProviderSelect.value = state.preferredProvider || '';
-    elements.modelSelect.value = state.model || '';
+    
+    // Configurar UI según proveedor guardado
+    if (state.preferredProvider) {
+        handleProviderChange();
+        // Restaurar modelo seleccionado
+        if (state.model) {
+            elements.modelSelect.value = state.model;
+            handleModelSelectChange();
+        }
+    }
+    
     elements.studentIdInput.focus();
 }
 
@@ -630,8 +770,8 @@ function saveUser() {
     // Mensaje de confirmación
     const configuredItems = [];
     if (studentId) configuredItems.push(`ID: ${studentId}`);
-    if (openaiKey) configuredItems.push('OpenAI ✓');
-    if (googleKey) configuredItems.push('Google ✓');
+    if (preferredProvider === 'openai' && openaiKey) configuredItems.push('🤖 OpenAI');
+    if (preferredProvider === 'google' && googleKey) configuredItems.push('💎 Google');
     if (model) configuredItems.push(`Modelo: ${model}`);
     
     if (configuredItems.length > 0) {
@@ -672,6 +812,12 @@ function clearUser() {
     elements.preferredProviderSelect.value = '';
     elements.modelSelect.value = '';
     
+    // Ocultar secciones dinámicas
+    elements.openaiKeySection.classList.add('hidden');
+    elements.googleKeySection.classList.add('hidden');
+    elements.modelSection.classList.add('hidden');
+    if (elements.modelInfo) elements.modelInfo.textContent = '';
+    
     updateUserDisplay();
     
     addMessage({
@@ -684,13 +830,14 @@ function clearUser() {
 }
 
 function updateUserDisplay() {
-    const hasConfig = state.studentId || state.openaiKey || state.googleKey;
+    const hasConfig = state.studentId || state.preferredProvider;
     
     if (hasConfig) {
         const parts = [];
         if (state.studentId) parts.push(state.studentId);
-        if (state.openaiKey) parts.push('🤖');
-        if (state.googleKey) parts.push('💎');
+        // Mostrar solo el proveedor configurado
+        if (state.preferredProvider === 'openai' && state.openaiKey) parts.push('🤖');
+        if (state.preferredProvider === 'google' && state.googleKey) parts.push('💎');
         if (state.model) parts.push(`[${state.model}]`);
         
         elements.currentUserDisplay.textContent = parts.join(' ');
@@ -947,6 +1094,11 @@ function init() {
     elements.databaseSelect.addEventListener('change', (e) => {
         switchDatabase(e.target.value);
     });
+    
+    // Event listeners - Proveedor y Modelo dinámico
+    elements.preferredProviderSelect.addEventListener('change', handleProviderChange);
+    elements.modelSelect.addEventListener('change', handleModelSelectChange);
+    
     elements.btnNewDatabase.addEventListener('click', () => {
         elements.newDatabaseForm.classList.toggle('hidden');
         if (!elements.newDatabaseForm.classList.contains('hidden')) {

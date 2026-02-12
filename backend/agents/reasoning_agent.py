@@ -29,8 +29,15 @@ from backend.models.llm import (
     get_llm,
     generate_with_user_keys,
 )
+from backend.models.model_limits import (
+    get_model_config,
+    get_safe_context_limit,
+    get_max_output_tokens,
+    DEFAULT_MODELS,
+)
 from backend.retrieval.hybrid_ranker import RankedResult
 from backend.utils.text import truncate_context, token_count, clean_whitespace
+from backend.settings import get_settings
 
 
 # ==========================================
@@ -38,15 +45,66 @@ from backend.utils.text import truncate_context, token_count, clean_whitespace
 # ==========================================
 
 
+def _get_default_context_limit(model: Optional[str] = None) -> int:
+    """
+    Obtiene el límite de contexto por defecto basado en el modelo.
+    
+    Args:
+        model: Nombre del modelo (usa el configurado si no se especifica)
+        
+    Returns:
+        Límite de contexto en tokens (usa 80% del disponible para contexto)
+    """
+    if model is None:
+        settings = get_settings()
+        model = settings.openai_model if settings.llm_provider.value == "openai" else settings.google_model
+    
+    # Obtener límite seguro dejando espacio para respuesta
+    safe_limit = get_safe_context_limit(model, output_tokens=4096)
+    
+    # Usar 80% del límite seguro para contexto de chunks
+    # El resto es para system prompt, conversación, etc.
+    return int(safe_limit * 0.8)
+
+
+def _get_default_conversation_limit(model: Optional[str] = None) -> int:
+    """
+    Obtiene el límite de tokens para historial de conversación.
+    
+    Args:
+        model: Nombre del modelo
+        
+    Returns:
+        Límite de tokens para conversación
+    """
+    if model is None:
+        settings = get_settings()
+        model = settings.openai_model if settings.llm_provider.value == "openai" else settings.google_model
+    
+    safe_limit = get_safe_context_limit(model, output_tokens=4096)
+    
+    # 15% del límite para historial de conversación
+    return int(safe_limit * 0.15)
+
+
 @dataclass
 class PromptConfig:
     """Configuración para construcción de prompts."""
     
-    max_context_tokens: int = 3000
-    max_conversation_tokens: int = 4000
+    # Límites dinámicos - se calculan según el modelo si no se especifican
+    max_context_tokens: int = 0  # 0 = usar límite dinámico
+    max_conversation_tokens: int = 0  # 0 = usar límite dinámico
     include_examples: bool = True
     include_sources: bool = True
     language: str = "es"
+    model: Optional[str] = None  # Modelo a usar para calcular límites
+    
+    def __post_init__(self):
+        """Calcula límites dinámicos si no se especificaron."""
+        if self.max_context_tokens == 0:
+            self.max_context_tokens = _get_default_context_limit(self.model)
+        if self.max_conversation_tokens == 0:
+            self.max_conversation_tokens = _get_default_conversation_limit(self.model)
     
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -55,6 +113,7 @@ class PromptConfig:
             "include_examples": self.include_examples,
             "include_sources": self.include_sources,
             "language": self.language,
+            "model": self.model,
         }
 
 
@@ -530,12 +589,16 @@ async def adapt_to_student(
     """
     Ajusta configuración según nivel y preferencias del estudiante.
     
+    El nivel del estudiante afecta la COMPLEJIDAD de la respuesta,
+    NO los límites de tokens. El modelo siempre necesita el máximo
+    contexto posible para generar respuestas de calidad.
+    
     Args:
         student_id: ID del estudiante
         config: Configuración base
         
     Returns:
-        Configuración adaptada
+        Configuración adaptada (solo complejidad, no tokens)
     """
     profile = await load_profile(student_id)
     
@@ -545,10 +608,11 @@ async def adapt_to_student(
     # Obtener config según nivel
     level_config = get_level_config(profile.level)
     
-    # Ajustar configuración según nivel de competencia
+    # Ajustar SOLO la complejidad de la respuesta, NO los tokens
+    # Los tokens de entrada/salida siempre deben ser máximos para mejor calidad
     if profile.level == ProficiencyLevel.BEGINNER:
+        # Principiantes: incluir ejemplos para facilitar comprensión
         config.include_examples = True
-        config.max_context_tokens = 2000  # Menos contexto, más explicación
         
     elif profile.level == ProficiencyLevel.ELEMENTARY:
         config.include_examples = True
@@ -557,12 +621,12 @@ async def adapt_to_student(
         config.include_examples = True
         
     elif profile.level == ProficiencyLevel.ADVANCED:
+        # Avanzados: menos ejemplos, respuestas más directas
         config.include_examples = False
-        config.max_context_tokens = 4000  # Más contexto
         
     elif profile.level == ProficiencyLevel.EXPERT:
+        # Expertos: respuestas técnicas sin simplificaciones
         config.include_examples = False
-        config.max_context_tokens = 4000
     
     return config
 
