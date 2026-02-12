@@ -254,57 +254,85 @@ class CacheManager(Generic[T]):
 
 
 # ==========================================
-# Caches Globales
+# Caches Multi-Database
 # ==========================================
 
-# Cache de respuestas
-_answer_cache: Optional[CacheManager[Dict[str, Any]]] = None
+# Caches por base de datos: {database_name: CacheManager}
+_answer_caches: Dict[str, CacheManager[Dict[str, Any]]] = {}
+_embedding_caches: Dict[str, CacheManager[List[float]]] = {}
+_chunk_caches: Dict[str, CacheManager[Dict[str, Any]]] = {}
 
-# Cache de embeddings
-_embedding_cache: Optional[CacheManager[List[float]]] = None
+# Lock para creación de caches
+_cache_lock = asyncio.Lock()
 
-# Cache de chunks
-_chunk_cache: Optional[CacheManager[Dict[str, Any]]] = None
+# Base de datos por defecto (se actualiza desde settings)
+_default_database: str = "paideia"
 
 
-def _get_answer_cache() -> CacheManager[Dict[str, Any]]:
-    """Obtiene cache de respuestas (singleton)."""
-    global _answer_cache
-    if _answer_cache is None:
+def set_default_database(database: str) -> None:
+    """Establece la base de datos por defecto para cache."""
+    global _default_database
+    _default_database = database
+
+
+def get_default_database() -> str:
+    """Obtiene la base de datos por defecto."""
+    return _default_database
+
+
+def _get_answer_cache(database: Optional[str] = None) -> CacheManager[Dict[str, Any]]:
+    """
+    Obtiene cache de respuestas para una base de datos específica.
+    
+    Args:
+        database: Nombre de la base de datos (usa default si no se especifica)
+        
+    Returns:
+        CacheManager para esa base de datos
+    """
+    db_name = database or _default_database
+    
+    if db_name not in _answer_caches:
         config = get_rag_config()
-        _answer_cache = CacheManager(
-            name="answers",
+        _answer_caches[db_name] = CacheManager(
+            name=f"answers:{db_name}",
             max_size=config.cache_max_size if hasattr(config, 'cache_max_size') else 500,
             default_ttl=config.cache_ttl if hasattr(config, 'cache_ttl') else 3600,
             strategy=CacheStrategy.LRU,
         )
-    return _answer_cache
+    return _answer_caches[db_name]
 
 
-def _get_embedding_cache() -> CacheManager[List[float]]:
-    """Obtiene cache de embeddings (singleton)."""
-    global _embedding_cache
-    if _embedding_cache is None:
-        _embedding_cache = CacheManager(
-            name="embeddings",
+def _get_embedding_cache(database: Optional[str] = None) -> CacheManager[List[float]]:
+    """
+    Obtiene cache de embeddings para una base de datos específica.
+    """
+    db_name = database or _default_database
+    
+    if db_name not in _embedding_caches:
+        _embedding_caches[db_name] = CacheManager(
+            name=f"embeddings:{db_name}",
             max_size=2000,
             default_ttl=86400,  # 24 horas
             strategy=CacheStrategy.LRU,
         )
-    return _embedding_cache
+    return _embedding_caches[db_name]
 
 
-def _get_chunk_cache() -> CacheManager[Dict[str, Any]]:
-    """Obtiene cache de chunks (singleton)."""
-    global _chunk_cache
-    if _chunk_cache is None:
-        _chunk_cache = CacheManager(
-            name="chunks",
+def _get_chunk_cache(database: Optional[str] = None) -> CacheManager[Dict[str, Any]]:
+    """
+    Obtiene cache de chunks para una base de datos específica.
+    """
+    db_name = database or _default_database
+    
+    if db_name not in _chunk_caches:
+        _chunk_caches[db_name] = CacheManager(
+            name=f"chunks:{db_name}",
             max_size=1000,
             default_ttl=7200,  # 2 horas
             strategy=CacheStrategy.LRU,
         )
-    return _chunk_cache
+    return _chunk_caches[db_name]
 
 
 # ==========================================
@@ -315,6 +343,7 @@ def _generate_cache_key(
     query: str,
     context: Optional[Dict[str, Any]] = None,
     prefix: str = "",
+    database: Optional[str] = None,
 ) -> str:
     """
     Genera clave de caché consistente.
@@ -323,6 +352,7 @@ def _generate_cache_key(
         query: Consulta o texto principal
         context: Contexto adicional
         prefix: Prefijo para la clave
+        database: Base de datos (se incluye en la clave)
         
     Returns:
         Clave de caché hasheada
@@ -333,6 +363,7 @@ def _generate_cache_key(
     # Incluir contexto relevante
     cache_data = {
         "query": normalized,
+        "database": database or _default_database,
     }
     
     if context:
@@ -354,6 +385,7 @@ def _generate_cache_key(
 async def get_cached_answer(
     query: str,
     context: Optional[Dict[str, Any]] = None,
+    database: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """
     Busca respuesta en caché para una consulta.
@@ -361,12 +393,13 @@ async def get_cached_answer(
     Args:
         query: Pregunta del usuario
         context: Contexto adicional (nivel, sesión, etc.)
+        database: Base de datos específica
         
     Returns:
         Respuesta cacheada o None
     """
-    cache = _get_answer_cache()
-    key = _generate_cache_key(query, context, prefix="answer")
+    cache = _get_answer_cache(database)
+    key = _generate_cache_key(query, context, prefix="answer", database=database)
     
     result = await cache.get(key)
     
@@ -384,6 +417,7 @@ async def store_cache(
     context: Optional[Dict[str, Any]] = None,
     ttl: Optional[int] = None,
     tags: Optional[List[str]] = None,
+    database: Optional[str] = None,
 ) -> str:
     """
     Almacena respuesta en caché.
@@ -394,12 +428,13 @@ async def store_cache(
         context: Contexto de la consulta
         ttl: Tiempo de vida en segundos
         tags: Tags para invalidación
+        database: Base de datos específica
         
     Returns:
         Clave de caché
     """
-    cache = _get_answer_cache()
-    key = _generate_cache_key(query, context, prefix="answer")
+    cache = _get_answer_cache(database)
+    key = _generate_cache_key(query, context, prefix="answer", database=database)
     
     # Preparar datos para almacenar
     cache_data = {
@@ -430,6 +465,7 @@ async def invalidate_cache(
     keys: Optional[List[str]] = None,
     tags: Optional[List[str]] = None,
     concepts: Optional[List[str]] = None,
+    database: Optional[str] = None,
 ) -> int:
     """
     Invalida entradas de caché.
@@ -438,11 +474,12 @@ async def invalidate_cache(
         keys: Claves específicas a invalidar
         tags: Tags para invalidación grupal
         concepts: Conceptos cuyas respuestas invalidar
+        database: Base de datos específica
         
     Returns:
         Número de entradas invalidadas
     """
-    cache = _get_answer_cache()
+    cache = _get_answer_cache(database)
     invalidated = 0
     
     # Invalidar por claves
@@ -468,18 +505,22 @@ async def invalidate_cache(
 # Cache de Embeddings
 # ==========================================
 
-async def get_cached_embedding(text: str) -> Optional[List[float]]:
+async def get_cached_embedding(
+    text: str,
+    database: Optional[str] = None,
+) -> Optional[List[float]]:
     """
     Obtiene embedding cacheado.
     
     Args:
         text: Texto del embedding
+        database: Base de datos específica
         
     Returns:
         Embedding o None
     """
-    cache = _get_embedding_cache()
-    key = _generate_cache_key(text, prefix="emb")
+    cache = _get_embedding_cache(database)
+    key = _generate_cache_key(text, prefix="emb", database=database)
     return await cache.get(key)
 
 
@@ -487,6 +528,7 @@ async def store_embedding(
     text: str,
     embedding: List[float],
     ttl: Optional[int] = None,
+    database: Optional[str] = None,
 ) -> str:
     """
     Almacena embedding en caché.
@@ -495,12 +537,13 @@ async def store_embedding(
         text: Texto original
         embedding: Vector embedding
         ttl: TTL opcional
+        database: Base de datos específica
         
     Returns:
         Clave de caché
     """
-    cache = _get_embedding_cache()
-    key = _generate_cache_key(text, prefix="emb")
+    cache = _get_embedding_cache(database)
+    key = _generate_cache_key(text, prefix="emb", database=database)
     
     await cache.set(key=key, value=embedding, ttl=ttl or 86400)
     
@@ -511,17 +554,21 @@ async def store_embedding(
 # Cache de Chunks
 # ==========================================
 
-async def get_cached_chunk(chunk_id: str) -> Optional[Dict[str, Any]]:
+async def get_cached_chunk(
+    chunk_id: str,
+    database: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
     """
     Obtiene chunk cacheado.
     
     Args:
         chunk_id: ID del chunk
+        database: Base de datos específica
         
     Returns:
         Datos del chunk o None
     """
-    cache = _get_chunk_cache()
+    cache = _get_chunk_cache(database)
     return await cache.get(f"chunk:{chunk_id}")
 
 
@@ -529,6 +576,7 @@ async def store_chunk(
     chunk_id: str,
     chunk_data: Dict[str, Any],
     ttl: Optional[int] = None,
+    database: Optional[str] = None,
 ) -> None:
     """
     Almacena chunk en caché.
@@ -537,8 +585,9 @@ async def store_chunk(
         chunk_id: ID del chunk
         chunk_data: Datos del chunk
         ttl: TTL opcional
+        database: Base de datos específica
     """
-    cache = _get_chunk_cache()
+    cache = _get_chunk_cache(database)
     
     tags = [f"doc:{chunk_data.get('document_id', '')}"]
     concepts = chunk_data.get("concepts", [])
@@ -552,17 +601,21 @@ async def store_chunk(
     )
 
 
-async def invalidate_chunks_by_document(document_id: str) -> int:
+async def invalidate_chunks_by_document(
+    document_id: str,
+    database: Optional[str] = None,
+) -> int:
     """
     Invalida chunks de un documento.
     
     Args:
         document_id: ID del documento
+        database: Base de datos específica
         
     Returns:
         Chunks invalidados
     """
-    cache = _get_chunk_cache()
+    cache = _get_chunk_cache(database)
     return await cache.invalidate_by_tag(f"doc:{document_id}")
 
 
@@ -570,33 +623,72 @@ async def invalidate_chunks_by_document(document_id: str) -> int:
 # Utilidades
 # ==========================================
 
-async def get_cache_stats() -> Dict[str, Any]:
+async def get_cache_stats(database: Optional[str] = None) -> Dict[str, Any]:
     """
     Obtiene estadísticas de todos los caches.
     
+    Args:
+        database: Base de datos específica (None para estadísticas globales)
+        
     Returns:
         Diccionario con estadísticas
     """
-    return {
-        "answer_cache": _get_answer_cache().get_stats().__dict__,
-        "embedding_cache": _get_embedding_cache().get_stats().__dict__,
-        "chunk_cache": _get_chunk_cache().get_stats().__dict__,
-    }
+    if database:
+        return {
+            "database": database,
+            "answer_cache": _get_answer_cache(database).get_stats().__dict__,
+            "embedding_cache": _get_embedding_cache(database).get_stats().__dict__,
+            "chunk_cache": _get_chunk_cache(database).get_stats().__dict__,
+        }
+    
+    # Estadísticas de todas las bases de datos
+    all_stats = {}
+    for db_name in set(list(_answer_caches.keys()) + list(_embedding_caches.keys()) + list(_chunk_caches.keys())):
+        all_stats[db_name] = {
+            "answer_cache": _get_answer_cache(db_name).get_stats().__dict__,
+            "embedding_cache": _get_embedding_cache(db_name).get_stats().__dict__,
+            "chunk_cache": _get_chunk_cache(db_name).get_stats().__dict__,
+        }
+    return all_stats
 
 
-async def clear_all_caches() -> None:
-    """Limpia todos los caches."""
-    await _get_answer_cache().clear()
-    await _get_embedding_cache().clear()
-    await _get_chunk_cache().clear()
+async def clear_all_caches(database: Optional[str] = None) -> None:
+    """
+    Limpia todos los caches.
+    
+    Args:
+        database: Base de datos específica (None para limpiar todos)
+    """
+    if database:
+        await _get_answer_cache(database).clear()
+        await _get_embedding_cache(database).clear()
+        await _get_chunk_cache(database).clear()
+    else:
+        for cache in _answer_caches.values():
+            await cache.clear()
+        for cache in _embedding_caches.values():
+            await cache.clear()
+        for cache in _chunk_caches.values():
+            await cache.clear()
 
 
-def reset_caches() -> None:
-    """Reinicia todas las instancias de caché (para testing)."""
-    global _answer_cache, _embedding_cache, _chunk_cache
-    _answer_cache = None
-    _embedding_cache = None
-    _chunk_cache = None
+def reset_caches(database: Optional[str] = None) -> None:
+    """
+    Reinicia instancias de caché (para testing).
+    
+    Args:
+        database: Base de datos específica (None para todos)
+    """
+    global _answer_caches, _embedding_caches, _chunk_caches
+    
+    if database:
+        _answer_caches.pop(database, None)
+        _embedding_caches.pop(database, None)
+        _chunk_caches.pop(database, None)
+    else:
+        _answer_caches = {}
+        _embedding_caches = {}
+        _chunk_caches = {}
 
 
 # ==========================================
@@ -606,6 +698,7 @@ def reset_caches() -> None:
 def cached(
     ttl: int = 3600,
     key_prefix: str = "",
+    use_database: bool = True,
 ):
     """
     Decorador para cachear resultados de funciones async.
@@ -613,16 +706,18 @@ def cached(
     Args:
         ttl: Tiempo de vida
         key_prefix: Prefijo para la clave
+        use_database: Si incluir database en la clave
     """
     def decorator(func):
-        async def wrapper(*args, **kwargs):
+        async def wrapper(*args, database: Optional[str] = None, **kwargs):
             # Generar clave basada en argumentos
             cache_key = _generate_cache_key(
                 f"{func.__name__}:{str(args)}:{str(sorted(kwargs.items()))}",
                 prefix=key_prefix or func.__name__,
+                database=database if use_database else None,
             )
             
-            cache = _get_answer_cache()
+            cache = _get_answer_cache(database)
             
             # Intentar obtener de caché
             cached_result = await cache.get(cache_key)

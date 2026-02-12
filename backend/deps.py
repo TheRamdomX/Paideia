@@ -2,16 +2,21 @@
 deps.py
 Inyección de dependencias para FastAPI.
 Proporciona DB, modelos y agentes como dependencias.
+
+Multi-tenant: Cada request usa su propia conexión a la DB especificada
+sin afectar a otros requests concurrentes.
 """
 
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any, AsyncGenerator, Dict, Optional, Type
 
-from fastapi import Header
+from fastapi import Header, Request
 from backend.db.surreal import get_db as get_surreal_db, connect, close, execute, switch_database
+from backend.db.pool import DatabasePool, DatabaseConnection
 from backend.models.embeddings import (
     BaseEmbedding,
     get_embedding_model,
@@ -30,9 +35,37 @@ from backend.settings import (
 # Configuración Global
 # ==========================================
 
-_db_connection: Optional[Any] = None
+_db_connection: Optional[Any] = None  # Legacy, para compatibilidad
 _llm_instance: Optional[BaseLLM] = None
 _embedding_model: Optional[BaseEmbedding] = None
+_db_pool: Optional[DatabasePool] = None
+
+
+@dataclass
+class RequestContext:
+    """Contexto de request con información de DB."""
+    database: str
+    connection: DatabaseConnection
+    
+    async def execute(self, query: str, params: Optional[Dict] = None) -> Any:
+        """Ejecuta query en la DB del contexto."""
+        return await self.connection.execute(query, params)
+    
+    async def create(self, table: str, data: Dict) -> Any:
+        """Crea registro en la DB del contexto."""
+        return await self.connection.create(table, data)
+    
+    async def select(self, table: str, record_id: Optional[str] = None) -> Any:
+        """Selecciona de la DB del contexto."""
+        return await self.connection.select(table, record_id)
+    
+    async def update(self, table: str, record_id: str, data: Dict) -> Any:
+        """Actualiza registro en la DB del contexto."""
+        return await self.connection.update(table, record_id, data)
+    
+    async def delete(self, table: str, record_id: str) -> Any:
+        """Elimina registro de la DB del contexto."""
+        return await self.connection.delete(table, record_id)
 
 
 def get_settings() -> Settings:
@@ -49,26 +82,32 @@ def get_settings() -> Settings:
 # Dependencias de Base de Datos
 # ==========================================
 
+def get_db_pool() -> DatabasePool:
+    """
+    Obtiene el pool de conexiones (singleton).
+    
+    Returns:
+        Instancia del pool de conexiones
+    """
+    global _db_pool
+    if _db_pool is None:
+        _db_pool = DatabasePool()
+    return _db_pool
+
+
 async def get_db(
     x_database: Optional[str] = Header(None, alias="X-Database")
 ) -> AsyncGenerator[Any, None]:
     """
     Dependencia para obtener conexión a la base de datos.
-    Puede cambiar la base de datos activa según el header X-Database.
+    
+    LEGACY: Esta función cambia la DB global. Para multi-tenant, usa get_db_context.
     
     Args:
         x_database: Nombre de la base de datos a usar (opcional)
     
     Yields:
-        Conexión a SurrealDB
-        
-    Example:
-        ```python
-        @app.get("/items")
-        async def get_items(db = Depends(get_db)):
-            result = await db.query("SELECT * FROM items")
-            return result
-        ```
+        Conexión raw a SurrealDB (para compatibilidad)
     """
     global _db_connection
     
@@ -86,15 +125,83 @@ async def get_db(
         pass
 
 
+async def get_db_context(
+    x_database: Optional[str] = Header(None, alias="X-Database")
+) -> AsyncGenerator[RequestContext, None]:
+    """
+    Dependencia para obtener conexión multi-tenant a la base de datos.
+    
+    MULTI-TENANT: Cada request obtiene su propia conexión a la DB
+    especificada en el header X-Database, sin afectar otras requests.
+    
+    Args:
+        x_database: Nombre de la base de datos a usar (opcional, usa default si no se especifica)
+    
+    Yields:
+        RequestContext con conexión a la DB especificada y el nombre de la DB
+        
+    Example:
+        ```python
+        @app.get("/items")
+        async def get_items(ctx: RequestContext = Depends(get_db_context)):
+            result = await ctx.execute("SELECT * FROM items")
+            # ctx.database contiene el nombre de la DB para cache
+            return result
+        ```
+    """
+    settings = _get_settings()
+    database = x_database or settings.surreal_database
+    
+    pool = get_db_pool()
+    connection = await pool.get_connection(database)
+    
+    ctx = RequestContext(database=database, connection=connection)
+    
+    try:
+        yield ctx
+    finally:
+        # La conexión se mantiene en el pool para reutilización
+        pass
+
+
+def get_database_name(
+    x_database: Optional[str] = Header(None, alias="X-Database")
+) -> str:
+    """
+    Dependencia simple para obtener el nombre de la base de datos actual.
+    
+    Útil cuando solo necesitas el nombre de la DB para cache o logging,
+    sin necesitar la conexión completa.
+    
+    Args:
+        x_database: Nombre de la base de datos del header
+    
+    Returns:
+        Nombre de la base de datos a usar
+    """
+    settings = _get_settings()
+    return x_database or settings.surreal_database
+
+
 async def init_db() -> None:
-    """Inicializa la base de datos con el schema."""
-    # La conexión se inicializa automáticamente
-    await get_surreal_db()
+    """Inicializa el pool de conexiones a la base de datos."""
+    global _db_pool
+    _db_pool = DatabasePool()
+    # Opcionalmente, pre-conectar a la DB por defecto
+    settings = _get_settings()
+    await _db_pool.get_connection(settings.surreal_database)
 
 
 async def close_db() -> None:
-    """Cierra la conexión a la base de datos."""
-    global _db_connection
+    """Cierra todas las conexiones del pool."""
+    global _db_connection, _db_pool
+    
+    # Cerrar pool nuevo
+    if _db_pool is not None:
+        await _db_pool.close_all()
+        _db_pool = None
+    
+    # Cerrar conexión legacy si existe
     if _db_connection is not None:
         await close()
         _db_connection = None
@@ -350,13 +457,16 @@ async def check_db_health() -> Dict[str, Any]:
         Estado de la conexión
     """
     try:
-        async for db in get_db():
-            # Ejecutar query simple
-            result = await db.query("INFO FOR DB")
-            return {
-                "status": "healthy",
-                "connected": True,
-            }
+        pool = get_db_pool()
+        settings = _get_settings()
+        connection = await pool.get_connection(settings.surreal_database)
+        # Ejecutar query simple
+        result = await connection.execute("INFO FOR DB")
+        return {
+            "status": "healthy",
+            "connected": True,
+            "active_connections": len(pool._connections),
+        }
     except Exception as e:
         return {
             "status": "unhealthy",
@@ -414,12 +524,17 @@ def reset_dependencies() -> None:
     
     Limpia el estado global para tests.
     """
-    global _db_connection, _llm_instance, _embedding_model, _agent_container
+    global _db_connection, _llm_instance, _embedding_model, _agent_container, _db_pool
     
     _db_connection = None
+    _db_pool = None
     _llm_instance = None
     _embedding_model = None
     _agent_container = None
+    
+    # Reset pool singleton - al poner _instance en None, la próxima 
+    # instanciación creará un pool nuevo
+    DatabasePool._instance = None
     
     # Limpiar cache de get_settings en settings.py
     from backend.settings import get_settings as settings_get

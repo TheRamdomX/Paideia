@@ -55,6 +55,7 @@ from backend.agents.retrieval_agent import (
 from backend.deps import (
     get_agents,
     get_db,
+    get_database_name,
     get_session_id,
     get_student_id,
     AgentContainer,
@@ -141,15 +142,27 @@ class SuggestionsResponse(BaseModel):
 
 
 # ==========================================
-# Cache (simple in-memory)
+# Cache (simple in-memory) - database-aware
 # ==========================================
 
 _response_cache: Dict[str, QueryResponse] = {}
 
 
-def _get_cache_key(question: str, student_id: Optional[str]) -> str:
-    """Genera clave de caché."""
+def _get_cache_key(question: str, student_id: Optional[str], database: Optional[str] = None) -> str:
+    """
+    Genera clave de caché incluyendo la base de datos.
+    
+    Args:
+        question: Pregunta del estudiante
+        student_id: ID del estudiante (opcional)
+        database: Nombre de la base de datos (opcional)
+    
+    Returns:
+        Clave única para el cache
+    """
     base = question.lower().strip()
+    if database:
+        base = f"{database}:{base}"
     if student_id:
         base += f":{student_id}"
     return base
@@ -174,13 +187,14 @@ async def query_student(
     x_preferred_provider: Optional[str] = Header(default=None),
     x_model: Optional[str] = Header(default=None),
     db: Any = Depends(get_db),
+    database: str = Depends(get_database_name),
 ) -> QueryResponse:
     """
     Procesa una pregunta del estudiante.
     
     Pipeline con Modo Pedagógico:
     1. Detectar/usar modo pedagógico (CONCEPT, PRACTICE, EXERCISE_LIST)
-    2. Verificar caché
+    2. Verificar caché (database-aware)
     3. Decidir estrategia de retrieval (mode-aware)
     4. Recuperar contexto (mode-aware)
     5. Generar respuesta (mode-aware)
@@ -209,9 +223,9 @@ async def query_student(
     else:
         learning_mode = await detect_mode(request.question)
     
-    # 2. Verificar caché (incluir modo en cache key)
+    # 2. Verificar caché (incluir database y modo en cache key)
     if request.use_cache:
-        cache_key = _get_cache_key(request.question, student_id) + f":{learning_mode.value}"
+        cache_key = _get_cache_key(request.question, student_id, database) + f":{learning_mode.value}"
         if cache_key in _response_cache:
             cached = _response_cache[cache_key]
             cached.cached = True
@@ -407,9 +421,9 @@ async def query_student(
         },
     )
     
-    # 12. Guardar en caché
+    # 12. Guardar en caché (database-aware)
     if request.use_cache:
-        cache_key = _get_cache_key(request.question, student_id) + f":{learning_mode.value}"
+        cache_key = _get_cache_key(request.question, student_id, database) + f":{learning_mode.value}"
         _response_cache[cache_key] = response
     
     return response
@@ -429,6 +443,7 @@ async def query_stream(
     x_preferred_provider: Optional[str] = Header(default=None, alias="X-Preferred-Provider"),
     x_model: Optional[str] = Header(default=None, alias="X-Model"),
     db: Any = Depends(get_db),
+    database: str = Depends(get_database_name),
 ) -> StreamingResponse:
     """
     Procesa consulta con respuesta en streaming.
@@ -684,11 +699,12 @@ async def get_suggestions(
 async def get_cached(
     question: str = QueryParam(...),
     student_id: Optional[str] = QueryParam(default=None),
+    database: str = Depends(get_database_name),
 ) -> Optional[QueryResponse]:
     """
     Busca respuesta en caché.
     """
-    cache_key = _get_cache_key(question, student_id)
+    cache_key = _get_cache_key(question, student_id, database)
     
     if cache_key in _response_cache:
         response = _response_cache[cache_key]
