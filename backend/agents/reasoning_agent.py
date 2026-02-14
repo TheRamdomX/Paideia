@@ -1,816 +1,520 @@
 """
 reasoning_agent.py
-Agente de Razonamiento - Genera respuestas finales con contexto curado.
-Adapta el nivel pedagógico según el perfil del estudiante.
-Soporta modos pedagógicos: CONCEPT, PRACTICE, EXERCISE_LIST.
+Agente de Razonamiento PASIVO - Solo genera texto.
+
+Este agente es completamente PASIVO:
+- Solo recibe contexto curado
+- Solo recibe instrucción de modo explícita
+- NO decide formato
+- NO detecta errores
+- NO evalúa resultados
+- NO adapta pedagogía
+
+Solo genera texto según lo que se le pide.
+Reflection evalúa el resultado.
+Orchestrator controla el flujo.
 """
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
-from enum import Enum
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
 from backend.agents.mode_router import LearningMode
-from backend.memory.session_memory import (
-    TurnRole,
-    get_context_for_llm,
-    get_active_concepts,
-)
-from backend.memory.student_profile import (
-    ProficiencyLevel,
-    StudentProfile,
-    load_profile,
-    get_level_config,
-)
-from backend.models.llm import (
-    generate, 
-    generate_stream, 
-    get_llm,
-    generate_with_user_keys,
-)
-from backend.models.model_limits import (
-    get_model_config,
-    get_safe_context_limit,
-    get_max_output_tokens,
-    DEFAULT_MODELS,
-)
-from backend.retrieval.hybrid_ranker import RankedResult
-from backend.utils.text import truncate_context, token_count, clean_whitespace
-from backend.settings import get_settings
+from backend.agents.retrieval_agent import RetrievalResultItem
+
+logger = logging.getLogger(__name__)
 
 
 # ==========================================
-# Configuración y Estructuras
+# Configuración de Prompt
 # ==========================================
-
-
-def _get_default_context_limit(model: Optional[str] = None) -> int:
-    """
-    Obtiene el límite de contexto por defecto basado en el modelo.
-    
-    Args:
-        model: Nombre del modelo (usa el configurado si no se especifica)
-        
-    Returns:
-        Límite de contexto en tokens (usa 80% del disponible para contexto)
-    """
-    if model is None:
-        settings = get_settings()
-        model = settings.openai_model if settings.llm_provider.value == "openai" else settings.google_model
-    
-    # Obtener límite seguro dejando espacio para respuesta
-    safe_limit = get_safe_context_limit(model, output_tokens=4096)
-    
-    # Usar 80% del límite seguro para contexto de chunks
-    # El resto es para system prompt, conversación, etc.
-    return int(safe_limit * 0.8)
-
-
-def _get_default_conversation_limit(model: Optional[str] = None) -> int:
-    """
-    Obtiene el límite de tokens para historial de conversación.
-    
-    Args:
-        model: Nombre del modelo
-        
-    Returns:
-        Límite de tokens para conversación
-    """
-    if model is None:
-        settings = get_settings()
-        model = settings.openai_model if settings.llm_provider.value == "openai" else settings.google_model
-    
-    safe_limit = get_safe_context_limit(model, output_tokens=4096)
-    
-    # 15% del límite para historial de conversación
-    return int(safe_limit * 0.15)
-
 
 @dataclass
 class PromptConfig:
-    """Configuración para construcción de prompts."""
+    """
+    Configuración para generación de prompts.
     
-    # Límites dinámicos - se calculan según el modelo si no se especifican
-    max_context_tokens: int = 0  # 0 = usar límite dinámico
-    max_conversation_tokens: int = 0  # 0 = usar límite dinámico
-    include_examples: bool = True
-    include_sources: bool = True
+    Esta configuración es CONSTRUIDA por el Orchestrator.
+    Reasoning la usa sin modificarla.
+    """
     language: str = "es"
-    model: Optional[str] = None  # Modelo a usar para calcular límites
+    max_tokens: int = 2048
+    temperature: float = 0.7
     
-    def __post_init__(self):
-        """Calcula límites dinámicos si no se especificaron."""
-        if self.max_context_tokens == 0:
-            self.max_context_tokens = _get_default_context_limit(self.model)
-        if self.max_conversation_tokens == 0:
-            self.max_conversation_tokens = _get_default_conversation_limit(self.model)
+    # Instrucciones explícitas (inyectadas por Orchestrator)
+    mode_instruction: str = ""
+    format_instruction: str = ""
+    
+    # Contexto de conversación
+    include_conversation: bool = True
+    conversation_turns: int = 3
+    
+    # Restricciones
+    prohibitions: List[str] = field(default_factory=list)
     
     def to_dict(self) -> Dict[str, Any]:
         return {
-            "max_context_tokens": self.max_context_tokens,
-            "max_conversation_tokens": self.max_conversation_tokens,
-            "include_examples": self.include_examples,
-            "include_sources": self.include_sources,
             "language": self.language,
-            "model": self.model,
+            "max_tokens": self.max_tokens,
+            "temperature": self.temperature,
+            "include_conversation": self.include_conversation,
         }
 
 
 @dataclass
 class GeneratedAnswer:
-    """Respuesta generada por el agente."""
+    """
+    Respuesta generada por el agente.
     
-    answer: str = ""
+    NO contiene evaluaciones.
+    Solo contiene el texto generado y metadata básica.
+    """
+    answer: str
     sources: List[str] = field(default_factory=list)
     concepts_covered: List[str] = field(default_factory=list)
-    confidence: float = 0.0
+    mode_used: LearningMode = LearningMode.CONCEPT
+    
+    # Metadata de generación
     tokens_used: int = 0
-    learning_mode: LearningMode = LearningMode.CONCEPT
+    model_used: str = ""
+    generation_time_ms: int = 0
+    
+    # Para trazabilidad (NO para decisiones)
+    confidence: float = 0.0
     metadata: Dict[str, Any] = field(default_factory=dict)
     
     def to_dict(self) -> Dict[str, Any]:
         return {
-            "answer": self.answer,
+            "answer": self.answer[:500] + "..." if len(self.answer) > 500 else self.answer,
             "sources": self.sources,
             "concepts_covered": self.concepts_covered,
-            "confidence": self.confidence,
+            "mode_used": self.mode_used.value,
             "tokens_used": self.tokens_used,
-            "learning_mode": self.learning_mode.value,
-            "metadata": self.metadata,
+            "model_used": self.model_used,
         }
 
 
 # ==========================================
-# Prompts por Modo Pedagógico
+# System Prompts por Modo
 # ==========================================
 
 LEARNING_MODE_PROMPTS = {
-    "es": {
-        LearningMode.CONCEPT: """Eres un tutor educativo especializado en EXPLICAR CONCEPTOS Y TEORÍA.
+    LearningMode.CONCEPT: """Eres un tutor educativo experto.
+Tu tarea es EXPLICAR CONCEPTOS de forma clara y pedagógica.
 
-MODO: CONCEPTO - Tu objetivo es explicar definiciones, teoría y relaciones entre conceptos.
+DEBES incluir:
+- Definiciones claras
+- Relaciones entre conceptos
+- Ejemplos ilustrativos
+- Contexto relevante
 
-REGLAS ESTRICTAS:
-1. SOLO usa información del contexto proporcionado
-2. NO uses conocimiento externo ni inventes información
-3. Explica DEFINICIONES de forma clara y precisa
-4. Describe RELACIONES entre conceptos cuando existan en el contexto
-5. Menciona PRERREQUISITOS si están disponibles
-6. Si falta información, indica: "No tengo información suficiente sobre este concepto en los documentos."
-7. Cita las fuentes [1], [2], etc.
+Usa lenguaje accesible y estructurado.
+Responde en {language}.""",
 
-ESTRUCTURA DE RESPUESTA:
-- Definición principal
-- Características clave
-- Relaciones con otros conceptos (si aplica)
-- Ejemplos del contexto (si existen)""",
+    LearningMode.PRACTICE: """Eres un tutor educativo experto en resolución de problemas.
+Tu tarea es EXPLICAR PASO A PASO cómo resolver ejercicios.
 
-        LearningMode.PRACTICE: """Eres un tutor educativo especializado en RESOLVER EJERCICIOS PASO A PASO.
-
-MODO: PRÁCTICA - Tu objetivo es explicar la resolución de ejercicios de forma detallada.
-
-REGLAS ESTRICTAS:
-1. SOLO usa información y métodos del contexto proporcionado
-2. NO inventes procedimientos ni uses conocimiento externo
-3. Explica CADA PASO de la solución claramente
-4. Justifica POR QUÉ se realiza cada paso
-5. Muestra el RESULTADO FINAL claramente
-6. Si el contexto no tiene suficiente información para resolver, indícalo
-7. Cita las fuentes [1], [2], etc.
-
-ESTRUCTURA DE RESPUESTA:
+DEBES incluir:
 - Identificación del problema
-- Datos e incógnitas
-- Pasos de resolución (numerados)
-- Resultado final
-- Verificación (si aplica)""",
+- Pasos numerados de resolución
+- Justificación de cada paso
+- Resultado final claro
 
-        LearningMode.EXERCISE_LIST: """Eres un asistente que LISTA EJERCICIOS disponibles.
+Sé detallado y metódico.
+Responde en {language}.""",
 
-MODO: LISTA DE EJERCICIOS - Tu objetivo es SOLO enumerar ejercicios, SIN explicarlos.
+    LearningMode.EXERCISE_LIST: """Eres un asistente educativo.
+Tu tarea es LISTAR ejercicios disponibles.
 
-REGLAS CRÍTICAS:
-1. SOLO lista ejercicios que existan en el contexto
-2. NO EXPLIQUES ni resuelvas los ejercicios
-3. NO INVENTES ejercicios que no estén en los documentos
-4. Para cada ejercicio incluye SOLO:
-   - Nombre/Título
-   - Dificultad (si está disponible)
-   - Concepto relacionado
-   - ID de referencia
-
-FORMATO OBLIGATORIO:
-📝 **[Título del Ejercicio]**
-   - Dificultad: [nivel]
-   - Concepto: [concepto relacionado]
-   - Ref: [id]
-
-Si NO hay ejercicios en el contexto, responde:
-"No encontré ejercicios en los documentos cargados. Te sugiero subir material con ejercicios prácticos."
+SOLO debes:
+- Enumerar los ejercicios encontrados
+- Incluir título y dificultad
+- Agrupar por concepto si es posible
 
 PROHIBIDO:
-❌ Explicar cómo resolver
-❌ Dar pistas o pasos
-❌ Inventar ejercicios
-❌ Resumir contenido""",
-    },
-    "en": {
-        LearningMode.CONCEPT: """You are an educational tutor specialized in EXPLAINING CONCEPTS AND THEORY.
+- Explicar cómo resolver los ejercicios
+- Dar pistas o soluciones
+- Agregar contenido explicativo
 
-MODE: CONCEPT - Your goal is to explain definitions, theory, and relationships between concepts.
-
-STRICT RULES:
-1. ONLY use information from the provided context
-2. DO NOT use external knowledge or invent information
-3. Explain DEFINITIONS clearly and precisely
-4. Describe RELATIONSHIPS between concepts when they exist in context
-5. Mention PREREQUISITES if available
-6. If information is missing, indicate: "I don't have enough information about this concept in the documents."
-7. Cite sources [1], [2], etc.
-
-RESPONSE STRUCTURE:
-- Main definition
-- Key characteristics
-- Relationships with other concepts (if applicable)
-- Examples from context (if they exist)""",
-
-        LearningMode.PRACTICE: """You are an educational tutor specialized in SOLVING EXERCISES STEP BY STEP.
-
-MODE: PRACTICE - Your goal is to explain exercise solutions in detail.
-
-STRICT RULES:
-1. ONLY use information and methods from the provided context
-2. DO NOT invent procedures or use external knowledge
-3. Explain EACH STEP of the solution clearly
-4. Justify WHY each step is performed
-5. Show the FINAL RESULT clearly
-6. If context lacks sufficient information to solve, indicate it
-7. Cite sources [1], [2], etc.
-
-RESPONSE STRUCTURE:
-- Problem identification
-- Data and unknowns
-- Resolution steps (numbered)
-- Final result
-- Verification (if applicable)""",
-
-        LearningMode.EXERCISE_LIST: """You are an assistant that LISTS available exercises.
-
-MODE: EXERCISE LIST - Your goal is to ONLY enumerate exercises, WITHOUT explaining them.
-
-CRITICAL RULES:
-1. ONLY list exercises that exist in the context
-2. DO NOT EXPLAIN or solve exercises
-3. DO NOT INVENT exercises that are not in the documents
-4. For each exercise include ONLY:
-   - Name/Title
-   - Difficulty (if available)
-   - Related concept
-   - Reference ID
-
-MANDATORY FORMAT:
-📝 **[Exercise Title]**
-   - Difficulty: [level]
-   - Concept: [related concept]
-   - Ref: [id]
-
-If there are NO exercises in the context, respond:
-"I didn't find exercises in the loaded documents. I suggest uploading material with practical exercises."
-
-FORBIDDEN:
-❌ Explaining how to solve
-❌ Giving hints or steps
-❌ Inventing exercises
-❌ Summarizing content""",
-    }
+Solo lista. Nada más.
+Responde en {language}.""",
 }
+
+# Formatos de respuesta por modo
+MODE_FORMAT_INSTRUCTIONS = {
+    LearningMode.CONCEPT: """
+Formato de respuesta:
+1. Introducción breve
+2. Definición principal
+3. Conceptos relacionados
+4. Ejemplo o aplicación
+5. Resumen (opcional)""",
+
+    LearningMode.PRACTICE: """
+Formato de respuesta:
+1. Planteamiento del problema
+2. Datos e incógnitas
+3. Pasos de resolución (numerados)
+4. Resultado final
+5. Verificación (opcional)""",
+
+    LearningMode.EXERCISE_LIST: """
+Formato de respuesta:
+Lista numerada de ejercicios:
+- Número
+- Título
+- Dificultad (fácil/medio/difícil)
+- Conceptos relacionados
+
+NO incluir explicaciones ni soluciones.""",
+}
+
+
+# ==========================================
+# Función Principal de Generación
+# ==========================================
+
+async def generate_answer(
+    query: str,
+    context_chunks: List[RetrievalResultItem],
+    mode: LearningMode,
+    session_id: Optional[str] = None,
+    config: Optional[PromptConfig] = None,
+    user_openai_key: Optional[str] = None,
+    user_google_key: Optional[str] = None,
+    preferred_provider: Optional[str] = None,
+    user_model: Optional[str] = None,
+) -> GeneratedAnswer:
+    """
+    Genera una respuesta usando el LLM.
+    
+    Este agente es PASIVO:
+    - Recibe contexto curado (del Retrieval)
+    - Recibe modo explícito (del Orchestrator)
+    - Genera texto
+    - NO toma decisiones pedagógicas
+    
+    Args:
+        query: Pregunta del usuario
+        context_chunks: Chunks de contexto (del Retrieval)
+        mode: Modo pedagógico (del Orchestrator)
+        session_id: ID de sesión para historial
+        config: Configuración de prompt
+        user_openai_key: API key de OpenAI
+        user_google_key: API key de Google
+        preferred_provider: Proveedor preferido
+        user_model: Modelo específico
+        
+    Returns:
+        GeneratedAnswer con el texto generado
+    """
+    import time
+    start_time = time.time()
+    
+    config = config or PromptConfig()
+    
+    logger.info(f"Generating answer: mode={mode.value}, chunks={len(context_chunks)}")
+    
+    # Construir prompt completo
+    system_prompt = _build_system_prompt(mode, config)
+    user_prompt = _build_user_prompt(query, context_chunks, mode, config)
+    
+    # Agregar prohibiciones si las hay
+    if config.prohibitions:
+        prohibition_text = "\n\nPROHIBIDO:\n" + "\n".join(f"- {p}" for p in config.prohibitions)
+        system_prompt += prohibition_text
+    
+    try:
+        # Importar LLM
+        from backend.models.llm import get_llm_with_user_keys
+        
+        # Obtener cliente LLM
+        llm = get_llm_with_user_keys(
+            user_openai_key=user_openai_key,
+            user_google_key=user_google_key,
+            preferred_provider=preferred_provider,
+            user_model=user_model,
+        )
+        
+        # Generar respuesta
+        answer_text = await llm.generate(
+            prompt=user_prompt,
+            system_prompt=system_prompt,
+            max_tokens=config.max_tokens,
+            temperature=config.temperature,
+        )
+        
+        tokens_used = 0  # No disponible directamente
+        model_used = llm.model
+        
+    except ImportError:
+        logger.warning("LLM module not available. Using mock response.")
+        answer_text = _mock_generate(query, context_chunks, mode)
+        tokens_used = 0
+        model_used = "mock"
+        
+    except Exception as e:
+        logger.error(f"Error generating answer: {e}")
+        answer_text = _generate_error_response(mode, config.language)
+        tokens_used = 0
+        model_used = "error"
+    
+    generation_time = int((time.time() - start_time) * 1000)
+    
+    # Extraer fuentes y conceptos de los chunks
+    sources = list(set(c.source for c in context_chunks if c.source))
+    concepts = []
+    for c in context_chunks:
+        concepts.extend(c.concepts)
+    concepts = list(set(concepts))[:10]
+    
+    return GeneratedAnswer(
+        answer=answer_text,
+        sources=sources,
+        concepts_covered=concepts,
+        mode_used=mode,
+        tokens_used=tokens_used,
+        model_used=model_used,
+        generation_time_ms=generation_time,
+        confidence=0.0,  # No evaluamos aquí, Reflection lo hace
+        metadata={
+            "chunk_count": len(context_chunks),
+            "config": config.to_dict(),
+        },
+    )
+
+
+async def generate_answer_stream(
+    query: str,
+    context_chunks: List[RetrievalResultItem],
+    mode: LearningMode,
+    session_id: Optional[str] = None,
+    config: Optional[PromptConfig] = None,
+    user_openai_key: Optional[str] = None,
+    user_google_key: Optional[str] = None,
+    preferred_provider: Optional[str] = None,
+    user_model: Optional[str] = None,
+) -> AsyncGenerator[str, None]:
+    """
+    Genera respuesta con streaming.
+    
+    Versión streaming de generate_answer.
+    Misma lógica PASIVA.
+    """
+    config = config or PromptConfig()
+    
+    system_prompt = _build_system_prompt(mode, config)
+    user_prompt = _build_user_prompt(query, context_chunks, mode, config)
+    
+    if config.prohibitions:
+        prohibition_text = "\n\nPROHIBIDO:\n" + "\n".join(f"- {p}" for p in config.prohibitions)
+        system_prompt += prohibition_text
+    
+    try:
+        from backend.models.llm import get_llm_with_user_keys
+        
+        llm = get_llm_with_user_keys(
+            user_openai_key=user_openai_key,
+            user_google_key=user_google_key,
+            preferred_provider=preferred_provider,
+            user_model=user_model,
+        )
+        
+        async for chunk in llm.generate_stream(
+            prompt=user_prompt,
+            system_prompt=system_prompt,
+            max_tokens=config.max_tokens,
+            temperature=config.temperature,
+        ):
+            yield chunk
+            
+    except ImportError:
+        logger.warning("LLM streaming not available. Using mock.")
+        mock_response = _mock_generate(query, context_chunks, mode)
+        for word in mock_response.split():
+            yield word + " "
+            
+    except Exception as e:
+        logger.error(f"Error in stream generation: {e}")
+        yield _generate_error_response(mode, config.language)
 
 
 # ==========================================
 # Construcción de Prompts
 # ==========================================
 
-async def build_prompt(
+def _build_system_prompt(mode: LearningMode, config: PromptConfig) -> str:
+    """Construye el system prompt según el modo."""
+    base_prompt = LEARNING_MODE_PROMPTS.get(mode, LEARNING_MODE_PROMPTS[LearningMode.CONCEPT])
+    base_prompt = base_prompt.format(language=config.language)
+    
+    # Agregar instrucciones de modo si las hay
+    if config.mode_instruction:
+        base_prompt += f"\n\nInstrucción adicional:\n{config.mode_instruction}"
+    
+    # Agregar formato
+    format_instruction = MODE_FORMAT_INSTRUCTIONS.get(mode, "")
+    if format_instruction:
+        base_prompt += f"\n{format_instruction}"
+    
+    # Agregar instrucciones de formato custom si las hay
+    if config.format_instruction:
+        base_prompt += f"\n\n{config.format_instruction}"
+    
+    return base_prompt
+
+
+def _build_user_prompt(
     query: str,
-    context_chunks: List[RankedResult],
-    session_id: Optional[str] = None,
-    config: Optional[PromptConfig] = None,
-    mode: LearningMode = LearningMode.CONCEPT,
+    context_chunks: List[RetrievalResultItem],
+    mode: LearningMode,
+    config: PromptConfig,
 ) -> str:
-    """
-    Construye prompt completo con contexto recuperado.
+    """Construye el user prompt con contexto."""
     
-    Args:
-        query: Pregunta del estudiante
-        context_chunks: Chunks de contexto recuperados
-        session_id: ID de sesión para historial
-        config: Configuración del prompt
-        mode: Modo de aprendizaje pedagógico
-        
-    Returns:
-        Prompt construido
-    """
-    config = config or PromptConfig()
-    
-    parts: List[str] = []
-    
-    # 1. Contexto recuperado (formateo diferente según modo)
-    if context_chunks:
-        if mode == LearningMode.EXERCISE_LIST:
-            context_text = _format_exercise_list_context(context_chunks)
-            parts.append(f"### Ejercicios Disponibles:\n{context_text}")
-        else:
-            context_text = _format_context(context_chunks, config.max_context_tokens)
-            parts.append(f"### Contexto Relevante:\n{context_text}")
-    
-    # 2. Historial de conversación (menos relevante para EXERCISE_LIST)
-    if session_id and mode != LearningMode.EXERCISE_LIST:
-        conversation = await get_context_for_llm(
-            session_id, 
-            max_tokens=config.max_conversation_tokens
-        )
-        
-        if conversation:
-            conv_text = _format_conversation(conversation)
-            parts.append(f"### Conversación Previa:\n{conv_text}")
-    
-    # 3. Pregunta actual
-    parts.append(f"### Pregunta del Estudiante:\n{query}")
-    
-    # 4. Instrucciones adicionales según modo
     if mode == LearningMode.EXERCISE_LIST:
-        parts.append("\n(Lista SOLO los ejercicios encontrados. NO expliques ni resuelvas.)")
-    elif mode == LearningMode.PRACTICE:
-        parts.append("\n(Explica la resolución paso a paso. Cita las fuentes.)")
-    elif config.include_sources:
-        parts.append("\n(Menciona las fuentes relevantes en tu respuesta)")
+        # Para EXERCISE_LIST: Solo listar ejercicios
+        return _build_exercise_list_prompt(query, context_chunks)
     
-    return "\n\n".join(parts)
+    # Para otros modos: Incluir contexto completo
+    context_text = _format_context(context_chunks, mode)
+    
+    prompt = f"""Pregunta del estudiante:
+{query}
+
+Contexto disponible:
+{context_text}
+
+Responde según el modo indicado."""
+    
+    return prompt
+
+
+def _build_exercise_list_prompt(
+    query: str,
+    context_chunks: List[RetrievalResultItem],
+) -> str:
+    """Construye prompt específico para EXERCISE_LIST."""
+    
+    exercises = []
+    for i, chunk in enumerate(context_chunks, 1):
+        title = chunk.exercise_title or f"Ejercicio {i}"
+        difficulty = chunk.difficulty or "medio"
+        concepts = ", ".join(chunk.concepts[:3]) if chunk.concepts else "general"
+        
+        exercises.append(f"- {title} (Dificultad: {difficulty}) - Conceptos: {concepts}")
+    
+    if not exercises:
+        exercises = ["No se encontraron ejercicios para esta consulta."]
+    
+    return f"""Consulta del estudiante: {query}
+
+Ejercicios encontrados:
+{chr(10).join(exercises)}
+
+Lista estos ejercicios de forma clara y organizada.
+NO expliques cómo resolverlos. Solo lista."""
 
 
 def _format_context(
-    chunks: List[RankedResult],
-    max_tokens: int,
+    chunks: List[RetrievalResultItem],
+    mode: LearningMode,
 ) -> str:
-    """Formatea chunks de contexto."""
-    formatted_parts: List[str] = []
-    current_tokens = 0
-    
-    for i, chunk in enumerate(chunks, 1):
-        chunk_text = f"[{i}] {chunk.content}"
-        chunk_tokens = token_count(chunk_text)
-        
-        if current_tokens + chunk_tokens > max_tokens:
-            # Truncar este chunk si es necesario
-            remaining = max_tokens - current_tokens - 50
-            if remaining > 100:
-                chunk_text = truncate_context(chunk_text, remaining)
-                formatted_parts.append(chunk_text)
-            break
-        
-        formatted_parts.append(chunk_text)
-        current_tokens += chunk_tokens
-    
-    return "\n\n".join(formatted_parts)
-
-
-def _format_exercise_list_context(chunks: List[RankedResult]) -> str:
-    """
-    Formatea chunks para modo EXERCISE_LIST.
-    Solo incluye metadatos de ejercicios, sin contenido explicativo.
-    """
-    formatted_parts: List[str] = []
-    
-    for i, chunk in enumerate(chunks, 1):
-        metadata = chunk.metadata or {}
-        
-        # Extraer información del ejercicio
-        title = metadata.get("title", metadata.get("name", f"Ejercicio {i}"))
-        difficulty = metadata.get("difficulty", metadata.get("nivel", "no especificado"))
-        concepts = ", ".join(chunk.concepts) if chunk.concepts else metadata.get("concept", "general")
-        ref_id = chunk.id or metadata.get("source_id", f"ref_{i}")
-        exercise_type = metadata.get("type", metadata.get("chunk_type", "ejercicio"))
-        
-        # Formato estructurado para el LLM
-        exercise_info = f"""[{i}] EJERCICIO:
-- Título: {title}
-- Dificultad: {difficulty}
-- Concepto: {concepts}
-- Tipo: {exercise_type}
-- Referencia: {ref_id}"""
-        
-        formatted_parts.append(exercise_info)
-    
-    if not formatted_parts:
-        return "No se encontraron ejercicios en el contexto."
-    
-    return "\n\n".join(formatted_parts)
-
-
-def _format_conversation(messages: List[Dict[str, str]]) -> str:
-    """Formatea historial de conversación."""
-    formatted: List[str] = []
-    
-    for msg in messages[-6:]:  # Últimos 6 mensajes
-        role = msg.get("role", "user")
-        content = msg.get("content", "")
-        
-        prefix = "Estudiante" if role == "user" else "Asistente"
-        # Truncar mensajes largos
-        if len(content) > 500:
-            content = content[:500] + "..."
-        
-        formatted.append(f"{prefix}: {content}")
-    
-    return "\n".join(formatted)
-
-
-# ==========================================
-# Generación de Respuestas
-# ==========================================
-
-async def generate_answer(
-    query: str,
-    context_chunks: List[RankedResult],
-    session_id: Optional[str] = None,
-    student_id: Optional[str] = None,
-    config: Optional[PromptConfig] = None,
-    user_openai_key: Optional[str] = None,
-    user_google_key: Optional[str] = None,
-    preferred_provider: Optional[str] = None,
-    user_model: Optional[str] = None,
-    mode: LearningMode = LearningMode.CONCEPT,
-) -> GeneratedAnswer:
-    """
-    Genera respuesta final usando el LLM.
-    
-    Args:
-        query: Pregunta del estudiante
-        context_chunks: Contexto recuperado
-        session_id: ID de sesión
-        student_id: ID del estudiante (para adaptación)
-        config: Configuración del prompt
-        user_openai_key: API key de OpenAI del usuario (opcional)
-        user_google_key: API key de Google del usuario (opcional)
-        preferred_provider: Proveedor preferido ('openai' o 'google')
-        user_model: Modelo específico a usar (ej: 'gpt-4', 'gemini-pro')
-        mode: Modo de aprendizaje pedagógico
-        
-    Returns:
-        GeneratedAnswer con la respuesta
-    """
-    config = config or PromptConfig()
-    
-    # Adaptar según perfil del estudiante (no para EXERCISE_LIST)
-    if student_id and mode != LearningMode.EXERCISE_LIST:
-        config = await adapt_to_student(student_id, config)
-    
-    # Construir prompt con modo
-    prompt = await build_prompt(
-        query=query,
-        context_chunks=context_chunks,
-        session_id=session_id,
-        config=config,
-        mode=mode,
-    )
-    
-    # Obtener system prompt por modo pedagógico
-    lang = config.language if config.language in LEARNING_MODE_PROMPTS else "es"
-    
-    # Usar prompt de modo pedagógico (siempre disponible para cada modo)
-    system_prompt = LEARNING_MODE_PROMPTS.get(lang, LEARNING_MODE_PROMPTS["es"]).get(
-        mode,
-        LEARNING_MODE_PROMPTS["es"][LearningMode.CONCEPT]  # Fallback a CONCEPT
-    )
-    
-    # Generar respuesta (siempre usar generate_with_user_keys para lógica unificada)
-    try:
-        # Ajustar temperatura según modo
-        temperature = 0.3 if mode == LearningMode.EXERCISE_LIST else 0.7
-        max_tokens = 1024 if mode == LearningMode.EXERCISE_LIST else 2048
-        
-        answer_text = await generate_with_user_keys(
-            prompt=prompt,
-            system_prompt=system_prompt,
-            user_openai_key=user_openai_key,
-            user_google_key=user_google_key,
-            preferred_provider=preferred_provider,
-            user_model=user_model,
-            temperature=temperature,
-            max_tokens=max_tokens,
-        )
-        
-        # Extraer fuentes legibles y conceptos
-        sources = _format_sources(context_chunks[:5])
-        concepts = _extract_concepts_from_chunks(context_chunks)
-        
-        # Calcular confianza basada en contexto y modo
-        confidence = _calculate_confidence(context_chunks, answer_text, mode)
-        
-        return GeneratedAnswer(
-            answer=clean_whitespace(answer_text),
-            sources=sources,
-            concepts_covered=concepts,
-            confidence=confidence,
-            tokens_used=token_count(prompt) + token_count(answer_text),
-            learning_mode=mode,
-            metadata={
-                "context_chunks": len(context_chunks),
-                "language": config.language,
-                "learning_mode": mode.value,
-            },
-        )
-        
-    except Exception as e:
-        return GeneratedAnswer(
-            answer=f"Lo siento, hubo un error generando la respuesta: {str(e)}",
-            confidence=0.0,
-            learning_mode=mode,
-            metadata={"error": str(e)},
-        )
-
-
-async def generate_answer_stream(
-    query: str,
-    context_chunks: List[RankedResult],
-    session_id: Optional[str] = None,
-    student_id: Optional[str] = None,
-    config: Optional[PromptConfig] = None,
-    mode: LearningMode = LearningMode.CONCEPT,
-) -> AsyncGenerator[str, None]:
-    """
-    Genera respuesta en streaming.
-    
-    Args:
-        query: Pregunta del estudiante
-        context_chunks: Contexto recuperado
-        session_id: ID de sesión
-        student_id: ID del estudiante
-        config: Configuración
-        mode: Modo de aprendizaje pedagógico
-        
-    Yields:
-        Chunks de texto de la respuesta
-    """
-    config = config or PromptConfig()
-    
-    if student_id and mode != LearningMode.EXERCISE_LIST:
-        config = await adapt_to_student(student_id, config)
-    
-    prompt = await build_prompt(
-        query=query,
-        context_chunks=context_chunks,
-        session_id=session_id,
-        config=config,
-        mode=mode,
-    )
-    
-    # Obtener system prompt por modo pedagógico
-    lang = config.language if config.language in LEARNING_MODE_PROMPTS else "es"
-    
-    system_prompt = LEARNING_MODE_PROMPTS.get(lang, LEARNING_MODE_PROMPTS["es"]).get(
-        mode,
-        LEARNING_MODE_PROMPTS["es"][LearningMode.CONCEPT]
-    )
-    
-    async for chunk in generate_stream(prompt, system_prompt):
-        yield chunk
-
-
-# ==========================================
-# Adaptación al Estudiante
-# ==========================================
-
-async def adapt_to_student(
-    student_id: str,
-    config: PromptConfig,
-) -> PromptConfig:
-    """
-    Ajusta configuración según nivel y preferencias del estudiante.
-    
-    El nivel del estudiante afecta la COMPLEJIDAD de la respuesta,
-    NO los límites de tokens. El modelo siempre necesita el máximo
-    contexto posible para generar respuestas de calidad.
-    
-    Args:
-        student_id: ID del estudiante
-        config: Configuración base
-        
-    Returns:
-        Configuración adaptada (solo complejidad, no tokens)
-    """
-    profile = await load_profile(student_id)
-    
-    if not profile:
-        return config
-    
-    # Obtener config según nivel
-    level_config = get_level_config(profile.level)
-    
-    # Ajustar SOLO la complejidad de la respuesta, NO los tokens
-    # Los tokens de entrada/salida siempre deben ser máximos para mejor calidad
-    if profile.level == ProficiencyLevel.BEGINNER:
-        # Principiantes: incluir ejemplos para facilitar comprensión
-        config.include_examples = True
-        
-    elif profile.level == ProficiencyLevel.ELEMENTARY:
-        config.include_examples = True
-        
-    elif profile.level == ProficiencyLevel.INTERMEDIATE:
-        config.include_examples = True
-        
-    elif profile.level == ProficiencyLevel.ADVANCED:
-        # Avanzados: menos ejemplos, respuestas más directas
-        config.include_examples = False
-        
-    elif profile.level == ProficiencyLevel.EXPERT:
-        # Expertos: respuestas técnicas sin simplificaciones
-        config.include_examples = False
-    
-    return config
-
-
-def adapt_response_complexity(
-    response: str,
-    profile: StudentProfile,
-) -> str:
-    """
-    Ajusta complejidad de respuesta post-generación.
-    
-    Args:
-        response: Respuesta generada
-        profile: Perfil del estudiante
-        
-    Returns:
-        Respuesta ajustada
-    """
-    # Por ahora retorna sin modificar
-    # En el futuro podría simplificar vocabulario, etc.
-    return response
-
-
-# ==========================================
-# Utilidades
-# ==========================================
-
-def _format_sources(chunks: List[RankedResult]) -> List[str]:
-    """
-    Formatea fuentes legibles para mostrar al usuario.
-    
-    En lugar de IDs de chunks, muestra:
-    - Nombre del documento/fuente
-    - Posición (página, sección, o índice de chunk)
-    
-    Args:
-        chunks: Lista de chunks usados como contexto
-        
-    Returns:
-        Lista de strings legibles con las fuentes
-    """
-    sources: List[str] = []
-    seen_sources: set = set()
-    
-    for chunk in chunks:
-        metadata = chunk.metadata or {}
-        
-        # Obtener título del documento
-        source_title = (
-            metadata.get("source_title") or
-            metadata.get("title") or
-            metadata.get("file_name") or
-            metadata.get("name") or
-            chunk.source_id or
-            "Documento"
-        )
-        
-        # Obtener posición en el documento
-        page = metadata.get("page") or metadata.get("page_number")
-        section = metadata.get("section") or metadata.get("heading")
-        chunk_index = metadata.get("chunk_index", metadata.get("index"))
-        line_start = metadata.get("line_start") or metadata.get("start_line")
-        
-        # Construir indicador de posición
-        position_parts: List[str] = []
-        if page:
-            position_parts.append(f"pág. {page}")
-        if section:
-            position_parts.append(f"§ {section}")
-        if line_start:
-            position_parts.append(f"línea {line_start}")
-        elif chunk_index is not None:
-            position_parts.append(f"fragmento {chunk_index + 1}")
-        
-        # Formatear fuente
-        if position_parts:
-            source_str = f"{source_title} ({', '.join(position_parts)})"
-        else:
-            source_str = source_title
-        
-        # Evitar duplicados
-        source_key = f"{source_title}:{page or chunk_index or 0}"
-        if source_key not in seen_sources:
-            sources.append(source_str)
-            seen_sources.add(source_key)
-    
-    return sources
-
-
-def _extract_concepts_from_chunks(chunks: List[RankedResult]) -> List[str]:
-    """Extrae conceptos únicos de los chunks."""
-    concepts: List[str] = []
-    seen: set = set()
-    
-    for chunk in chunks:
-        for concept in chunk.concepts:
-            if concept not in seen:
-                concepts.append(concept)
-                seen.add(concept)
-    
-    return concepts[:10]  # Limitar a 10
-
-
-def _calculate_confidence(
-    chunks: List[RankedResult],
-    answer: str,
-    mode: LearningMode = LearningMode.CONCEPT,
-) -> float:
-    """
-    Calcula confianza de la respuesta.
-    
-    Factores:
-    - Scores de los chunks
-    - Cantidad de chunks usados
-    - Longitud de la respuesta
-    - Alineación con el modo pedagógico
-    """
+    """Formatea los chunks de contexto para el prompt."""
     if not chunks:
-        return 0.3
+        return "No hay contexto disponible."
     
-    # Factor 1: Score promedio de chunks
-    avg_chunk_score = sum(c.final_score for c in chunks) / len(chunks)
+    formatted = []
+    for i, chunk in enumerate(chunks[:8], 1):  # Max 8 chunks
+        source = f" (Fuente: {chunk.source})" if chunk.source else ""
+        concepts = f" [Conceptos: {', '.join(chunk.concepts[:3])}]" if chunk.concepts else ""
+        
+        # Truncar contenido muy largo
+        content = chunk.content
+        if len(content) > 800:
+            content = content[:800] + "..."
+        
+        formatted.append(f"[{i}]{source}{concepts}\n{content}")
     
-    # Factor 2: Cantidad de chunks (más = mejor hasta cierto punto)
-    chunk_factor = min(1.0, len(chunks) / 5)
-    
-    # Factor 3: Respuesta no vacía (ajustado por modo)
-    if mode == LearningMode.EXERCISE_LIST:
-        # Para lista de ejercicios, respuestas más cortas son aceptables
-        answer_factor = 0.9 if len(answer) > 50 else 0.5
-    else:
-        answer_factor = 0.9 if len(answer) > 100 else 0.5
-    
-    # Factor 4: Alineación con modo
-    mode_factor = 1.0
-    if mode == LearningMode.EXERCISE_LIST:
-        # Verificar que no haya explicaciones largas
-        if "paso" in answer.lower() or "solución" in answer.lower():
-            mode_factor = 0.7  # Penalizar si explica en modo lista
-    elif mode == LearningMode.PRACTICE:
-        # Verificar que haya pasos
-        if "1." in answer or "paso" in answer.lower():
-            mode_factor = 1.1  # Bonus si tiene estructura de pasos
-    
-    # Combinar factores
-    confidence = (
-        avg_chunk_score * 0.4 + 
-        chunk_factor * 0.25 + 
-        answer_factor * 0.2 +
-        (mode_factor - 1.0) * 0.15 + 0.15
-    )
-    
-    return min(1.0, max(0.0, confidence))
+    return "\n\n".join(formatted)
 
 
-async def get_suggested_followups(
+# ==========================================
+# Funciones Auxiliares
+# ==========================================
+
+def _mock_generate(
     query: str,
-    answer: str,
-    concepts: List[str],
-    student_id: Optional[str] = None,
-) -> List[str]:
-    """
-    Genera sugerencias de preguntas de seguimiento.
+    context_chunks: List[RetrievalResultItem],
+    mode: LearningMode,
+) -> str:
+    """Genera respuesta mock para testing."""
     
-    Args:
-        query: Pregunta original
-        answer: Respuesta dada
-        concepts: Conceptos cubiertos
-        student_id: ID del estudiante
-        
-    Returns:
-        Lista de preguntas sugeridas
-    """
-    # Por ahora retorna sugerencias estáticas basadas en conceptos
-    suggestions: List[str] = []
+    if mode == LearningMode.EXERCISE_LIST:
+        exercises = [c.exercise_title or f"Ejercicio {i+1}" for i, c in enumerate(context_chunks[:5])]
+        return "Ejercicios disponibles:\n" + "\n".join(f"{i+1}. {e}" for i, e in enumerate(exercises))
     
-    if concepts:
-        suggestions.append(f"¿Puedes explicar más sobre {concepts[0]}?")
-        
-        if len(concepts) > 1:
-            suggestions.append(
-                f"¿Cuál es la relación entre {concepts[0]} y {concepts[1]}?"
-            )
+    elif mode == LearningMode.PRACTICE:
+        return f"""Para resolver este problema sobre "{query[:50]}":
+
+1. Identificar los datos del problema
+2. Aplicar la fórmula correspondiente
+3. Sustituir valores
+4. Calcular el resultado
+
+Resultado: [Respuesta simulada]"""
     
-    suggestions.append("¿Puedes darme un ejemplo práctico?")
+    else:  # CONCEPT
+        return f"""Explicación sobre "{query[:50]}":
+
+Este concepto se refiere a... [contenido simulado].
+
+Los aspectos principales son:
+- Aspecto 1
+- Aspecto 2
+- Aspecto 3
+
+En resumen, [resumen simulado]."""
+
+
+def _generate_error_response(mode: LearningMode, language: str) -> str:
+    """Genera respuesta de error genérica."""
+    if language == "es":
+        return "Lo siento, hubo un error al generar la respuesta. Por favor, intenta de nuevo."
+    return "Sorry, there was an error generating the response. Please try again."
+
+
+def get_fallback_message(mode: LearningMode, language: str = "es") -> str:
+    """Obtiene mensaje de fallback según el modo."""
+    fallbacks = {
+        "es": {
+            LearningMode.CONCEPT: "No pude encontrar información suficiente sobre este concepto.",
+            LearningMode.PRACTICE: "No pude encontrar ejemplos resueltos para este ejercicio.",
+            LearningMode.EXERCISE_LIST: "No encontré ejercicios disponibles sobre este tema.",
+        },
+        "en": {
+            LearningMode.CONCEPT: "I couldn't find enough information about this concept.",
+            LearningMode.PRACTICE: "I couldn't find worked examples for this exercise.",
+            LearningMode.EXERCISE_LIST: "I couldn't find available exercises on this topic.",
+        },
+    }
     
-    return suggestions[:3]
+    lang_fallbacks = fallbacks.get(language, fallbacks["es"])
+    return lang_fallbacks.get(mode, lang_fallbacks[LearningMode.CONCEPT])
+
+
+# ==========================================
+# Exports
+# ==========================================
+
+__all__ = [
+    "PromptConfig",
+    "GeneratedAnswer",
+    "generate_answer",
+    "generate_answer_stream",
+    "get_fallback_message",
+    "LEARNING_MODE_PROMPTS",
+    "MODE_FORMAT_INSTRUCTIONS",
+]

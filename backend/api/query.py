@@ -1,7 +1,7 @@
 """
 query.py
 Endpoint principal para consultas del estudiante.
-Orquesta mode routing + retrieval + reasoning + reflection.
+Usa el Orchestrator para coordinar el pipeline completo.
 """
 
 from __future__ import annotations
@@ -28,29 +28,29 @@ from backend.agents.mode_router import (
     detect_mode_with_details,
     get_mode_description,
 )
-from backend.agents.reasoning_agent import (
-    GeneratedAnswer,
-    PromptConfig,
-    build_prompt,
-    generate_answer,
-    generate_answer_stream,
-)
-from backend.agents.reflection_agent import (
-    EvaluationResult,
-    ReflectionDecision,
-    RetryConfig,
-    decide_retry,
-    evaluate_answer,
-    generate_fallback_response,
-    get_retry_adjustments,
-    get_mode_mismatch_corrections,
+from backend.agents.orchestrator import (
+    PipelineOrchestrator,
+    OrchestratorConfig,
+    OrchestratorResult,
+    orchestrate,
 )
 from backend.agents.retrieval_agent import (
     RetrievalResult,
     RetrievalStrategy,
-    decide_strategy,
+    StrategyDecision,
     retrieve,
-    score_results,
+    build_strategy_for_mode,
+)
+from backend.agents.reasoning_agent import (
+    GeneratedAnswer,
+    PromptConfig,
+    generate_answer,
+)
+from backend.agents.reflection_agent import (
+    EvaluationResult,
+    ReflectionDecision,
+    evaluate_answer,
+    get_fallback_message,
 )
 from backend.deps import (
     get_agents,
@@ -190,16 +190,14 @@ async def query_student(
     database: str = Depends(get_database_name),
 ) -> QueryResponse:
     """
-    Procesa una pregunta del estudiante.
+    Procesa una pregunta del estudiante usando el Orchestrator.
     
-    Pipeline con Modo Pedagógico:
-    1. Detectar/usar modo pedagógico (CONCEPT, PRACTICE, EXERCISE_LIST)
-    2. Verificar caché (database-aware)
-    3. Decidir estrategia de retrieval (mode-aware)
-    4. Recuperar contexto (mode-aware)
-    5. Generar respuesta (mode-aware)
-    6. Evaluar (mode-aware) y posiblemente reintentar/re-routing
-    7. Guardar en sesión y caché
+    El Orchestrator coordina:
+    1. Mode Router → detecta intención pedagógica
+    2. Retrieval Agent → obtiene contexto
+    3. Reasoning Agent → genera respuesta
+    4. Reflection Agent → evalúa y decide
+    5. Loop controlado hasta ACCEPT o FALLBACK
     """
     start_time = time.time()
     query_id = str(uuid.uuid4())
@@ -214,17 +212,18 @@ async def query_student(
     
     await get_or_create_session(session_id, student_id)
     
-    # 1. NUEVO: Detectar modo pedagógico
+    # Determinar modo forzado si se especificó
+    forced_mode = None
     if request.learning_mode:
         try:
-            learning_mode = LearningMode(request.learning_mode)
+            forced_mode = LearningMode(request.learning_mode)
         except ValueError:
-            learning_mode = await detect_mode(request.question)
-    else:
-        learning_mode = await detect_mode(request.question)
+            pass  # Se auto-detectará
     
-    # 2. Verificar caché (incluir database y modo en cache key)
+    # Verificar caché
     if request.use_cache:
+        # Pre-detectar modo para cache key
+        learning_mode = forced_mode or await detect_mode(request.question)
         cache_key = _get_cache_key(request.question, student_id, database) + f":{learning_mode.value}"
         if cache_key in _response_cache:
             cached = _response_cache[cache_key]
@@ -233,57 +232,28 @@ async def query_student(
             cached.processing_time_ms = int((time.time() - start_time) * 1000)
             return cached
     
-    # 3. Decidir estrategia (mode-aware)
-    strategy_decision = await decide_strategy(
-        query=request.question,
-        student_id=student_id,
-        mode=learning_mode,
+    # Configurar orchestrator
+    orch_config = OrchestratorConfig(
+        max_retries=3,
+        min_acceptable_score=0.5,
+        enable_reflection_loop=True,
+        fallback_on_max_retries=True,
     )
     
-    # 4. Recuperar contexto (mode-aware)
-    retrieval_result = await retrieve(
-        query=request.question,
-        strategy=strategy_decision,
-        student_id=student_id,
-        openai_api_key=x_openai_key,
-        google_api_key=x_google_key,
-        mode=learning_mode,
-    )
-    
-    # Re-score si hay student_id (mode-aware)
-    if student_id:
-        scored_results = await score_results(
-            results=retrieval_result.results,
-            query=request.question,
-            student_id=student_id,
-            mode=learning_mode,
-        )
-    else:
-        scored_results = retrieval_result.results
-    
-    # 5. Configurar prompt
-    prompt_config = PromptConfig(
-        language="es",
-    )
-    if request.max_context:
-        prompt_config.max_context_tokens = request.max_context
-    
-    # 6. Generar respuesta (mode-aware)
+    # Ejecutar pipeline via orchestrator
     try:
-        answer = await generate_answer(
+        result = await orchestrate(
             query=request.question,
-            context_chunks=scored_results,
             session_id=session_id,
             student_id=student_id,
-            config=prompt_config,
             user_openai_key=x_openai_key,
             user_google_key=x_google_key,
             preferred_provider=x_preferred_provider,
             user_model=x_model,
-            mode=learning_mode,
+            forced_mode=forced_mode,
+            config=orch_config,
         )
     except ValueError as e:
-        # Errores de configuración (API key inválida, modelo no encontrado)
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e),
@@ -293,7 +263,7 @@ async def query_student(
         if "not found" in error_msg or "404" in error_msg:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Modelo no encontrado. Verifica el nombre del modelo.",
+                detail="Modelo no encontrado. Verifica el nombre del modelo.",
             )
         elif "api key" in error_msg or "invalid" in error_msg:
             raise HTTPException(
@@ -303,90 +273,10 @@ async def query_student(
         else:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Error al generar respuesta: {str(e)[:200]}",
+                detail=f"Error procesando consulta: {str(e)[:200]}",
             )
     
-    # 7. Evaluar respuesta (mode-aware)
-    evaluation = await evaluate_answer(
-        query=request.question,
-        answer=answer,
-        context_chunks=scored_results,
-        mode=learning_mode,
-    )
-    
-    # 8. Reintentar si es necesario (incluyendo MODE_MISMATCH)
-    retries = 0
-    max_retries = 2
-    
-    while evaluation.decision in [
-        ReflectionDecision.RETRY,
-        ReflectionDecision.REQUEST_MORE_CONTEXT,
-        ReflectionDecision.MODE_MISMATCH,
-    ] and retries < max_retries:
-        retries += 1
-        
-        # Ajustar configuración y retrieval
-        prompt_config, retrieval_adjustments = get_retry_adjustments(
-            evaluation, prompt_config, learning_mode
-        )
-        
-        # Si es MODE_MISMATCH, aplicar correcciones específicas
-        if evaluation.decision == ReflectionDecision.MODE_MISMATCH:
-            corrections = get_mode_mismatch_corrections(evaluation, learning_mode)
-            
-            # Re-hacer retrieval con ajustes
-            if corrections.get("reroute") and corrections.get("retrieval_changes"):
-                # Actualizar estrategia con correcciones
-                strategy_decision = await decide_strategy(
-                    query=request.question,
-                    student_id=student_id,
-                    mode=learning_mode,
-                )
-                
-                retrieval_result = await retrieve(
-                    query=request.question,
-                    strategy=strategy_decision,
-                    student_id=student_id,
-                    openai_api_key=x_openai_key,
-                    google_api_key=x_google_key,
-                    mode=learning_mode,
-                )
-                scored_results = retrieval_result.results
-        
-        # Regenerar respuesta
-        answer = await generate_answer(
-            query=request.question,
-            context_chunks=scored_results,
-            session_id=session_id,
-            student_id=student_id,
-            config=prompt_config,
-            user_openai_key=x_openai_key,
-            user_google_key=x_google_key,
-            preferred_provider=x_preferred_provider,
-            user_model=x_model,
-            mode=learning_mode,
-        )
-        
-        # Re-evaluar
-        evaluation = await evaluate_answer(
-            query=request.question,
-            answer=answer,
-            context_chunks=scored_results,
-            previous_evaluation=evaluation,
-            mode=learning_mode,
-        )
-    
-    # 9. Fallback si aún falla
-    if evaluation.decision == ReflectionDecision.FALLBACK:
-        fallback_text = await generate_fallback_response(
-            query=request.question,
-            context_chunks=scored_results,
-            evaluation=evaluation,
-        )
-        answer.answer = fallback_text
-        answer.confidence = 0.5
-    
-    # 10. Guardar en sesión
+    # Guardar en sesión
     await add_turn(
         session_id=session_id,
         role=TurnRole.USER,
@@ -395,35 +285,36 @@ async def query_student(
     await add_turn(
         session_id=session_id,
         role=TurnRole.ASSISTANT,
-        content=answer.answer,
-        metadata={"concepts": answer.concepts_covered, "learning_mode": learning_mode.value},
+        content=result.answer,
+        metadata={"concepts": result.concepts, "learning_mode": result.mode.value},
     )
     
-    # 11. Construir respuesta
+    # Construir respuesta
     processing_time = int((time.time() - start_time) * 1000)
     
     response = QueryResponse(
-        answer=answer.answer,
-        sources=answer.sources,
-        concepts=answer.concepts_covered,
-        confidence=answer.confidence,
+        answer=result.answer,
+        sources=result.sources,
+        concepts=result.concepts,
+        confidence=result.confidence,
         session_id=session_id,
         query_id=query_id,
-        strategy_used=strategy_decision.strategy.value,
-        learning_mode=learning_mode.value,
+        strategy_used="orchestrated",
+        learning_mode=result.mode.value,
         cached=False,
         processing_time_ms=processing_time,
         metadata={
-            "retries": retries,
-            "evaluation_score": evaluation.overall_score,
-            "mode_alignment_score": evaluation.mode_alignment_score,
-            "mode_description": get_mode_description(learning_mode),
+            "iterations": result.iterations,
+            "final_decision": result.final_decision.value,
+            "mode_changes": result.mode_changes,
+            "retrieval_expansions": result.retrieval_expansions,
+            "mode_description": get_mode_description(result.mode),
         },
     )
     
-    # 12. Guardar en caché (database-aware)
+    # Guardar en caché
     if request.use_cache:
-        cache_key = _get_cache_key(request.question, student_id, database) + f":{learning_mode.value}"
+        cache_key = _get_cache_key(request.question, student_id, database) + f":{result.mode.value}"
         _response_cache[cache_key] = response
     
     return response
@@ -432,7 +323,7 @@ async def query_student(
 @router.post(
     "/stream",
     summary="Consulta con streaming",
-    description="Consulta con respuesta en streaming (mode-aware)",
+    description="Consulta con respuesta en streaming (simplificado)",
 )
 async def query_stream(
     request: QueryRequest,
@@ -447,7 +338,8 @@ async def query_stream(
 ) -> StreamingResponse:
     """
     Procesa consulta con respuesta en streaming.
-    Soporta modos pedagógicos.
+    Nota: Streaming usa pipeline simplificado sin loop de reflexión completo.
+    Para reflexión completa, usar endpoint principal sin streaming.
     """
     session_id = request.session_id or x_session_id or str(uuid.uuid4())
     student_id = request.student_id or x_student_id
@@ -463,17 +355,13 @@ async def query_stream(
     else:
         learning_mode = await detect_mode(request.question)
     
-    # Decidir estrategia (mode-aware)
-    strategy_decision = await decide_strategy(
-        query=request.question,
-        student_id=student_id,
-        mode=learning_mode,
-    )
+    # Construir estrategia usando el builder
+    strategy = build_strategy_for_mode(learning_mode)
     
-    # Recuperar contexto (mode-aware)
+    # Recuperar contexto
     retrieval_result = await retrieve(
         query=request.question,
-        strategy=strategy_decision,
+        strategy=strategy,
         student_id=student_id,
         openai_api_key=x_openai_key,
         google_api_key=x_google_key,
@@ -481,23 +369,28 @@ async def query_stream(
     )
     
     # Configurar prompt
-    prompt_config = PromptConfig(
-        language="es",
-    )
+    prompt_config = PromptConfig(language="es")
     
     async def generate_stream():
-        """Generador de streaming."""
-        full_response = ""
-        
-        async for chunk in generate_answer_stream(
+        """Generador de streaming simplificado."""
+        # Generar respuesta no-streaming y enviarla en chunks
+        answer = await generate_answer(
             query=request.question,
             context_chunks=retrieval_result.results,
-            session_id=session_id,
-            student_id=student_id,
-            config=prompt_config,
             mode=learning_mode,
-        ):
-            full_response += chunk
+            session_id=session_id,
+            config=prompt_config,
+            user_openai_key=x_openai_key,
+            user_google_key=x_google_key,
+            preferred_provider=x_preferred_provider,
+            user_model=x_model,
+        )
+        
+        # Enviar respuesta en chunks
+        full_response = answer.answer
+        chunk_size = 50
+        for i in range(0, len(full_response), chunk_size):
+            chunk = full_response[i:i+chunk_size]
             yield f"data: {chunk}\n\n"
         
         # Guardar en sesión al final
@@ -539,12 +432,7 @@ async def query_debug(
 ) -> QueryDebugResponse:
     """
     Consulta con información completa de debug.
-    
-    Incluye:
-    - Resultados de retrieval
-    - Decisión de estrategia
-    - Evaluación de respuesta
-    - Prompt utilizado
+    Usa el orchestrator con trazabilidad completa.
     """
     start_time = time.time()
     query_id = str(uuid.uuid4())
@@ -554,109 +442,56 @@ async def query_debug(
     
     await get_or_create_session(session_id, student_id)
     
-    # Estrategia
-    strategy_decision = await decide_strategy(
-        query=request.question,
-        student_id=student_id,
-    )
-    
-    # Retrieval
-    retrieval_result = await retrieve(
-        query=request.question,
-        strategy=strategy_decision,
-        student_id=student_id,
-        openai_api_key=x_openai_key,
-        google_api_key=x_google_key,
-    )
-    
-    # Re-score
-    if student_id:
-        scored_results = await score_results(
-            results=retrieval_result.results,
-            query=request.question,
-            student_id=student_id,
-        )
+    # Detectar modo
+    if request.learning_mode:
+        try:
+            forced_mode = LearningMode(request.learning_mode)
+        except ValueError:
+            forced_mode = None
     else:
-        scored_results = retrieval_result.results
+        forced_mode = None
     
-    # Configuración
-    prompt_config = PromptConfig(
-        language="es",
+    # Ejecutar via orchestrator
+    orch_config = OrchestratorConfig(
+        max_retries=3,
+        enable_reflection_loop=True,
+        log_decisions=True,
     )
     
-    # Prompt
-    prompt = await build_prompt(
+    orchestrator = PipelineOrchestrator(orch_config)
+    result = await orchestrator.process(
         query=request.question,
-        context_chunks=scored_results,
-        session_id=session_id,
-        config=prompt_config,
-    )
-    
-    # Generar respuesta
-    answer = await generate_answer(
-        query=request.question,
-        context_chunks=scored_results,
         session_id=session_id,
         student_id=student_id,
-        config=prompt_config,
+        user_openai_key=x_openai_key,
+        user_google_key=x_google_key,
+        preferred_provider=x_preferred_provider,
+        user_model=x_model,
+        forced_mode=forced_mode,
     )
-    
-    # Evaluar
-    evaluation = await evaluate_answer(
-        query=request.question,
-        answer=answer,
-        context_chunks=scored_results,
-    )
-    
-    # Reintentos
-    retries = 0
-    max_retries = 2
-    
-    while evaluation.decision in [
-        ReflectionDecision.RETRY,
-        ReflectionDecision.REQUEST_MORE_CONTEXT,
-    ] and retries < max_retries:
-        retries += 1
-        prompt_config = get_retry_adjustments(evaluation, prompt_config)
-        answer = await generate_answer(
-            query=request.question,
-            context_chunks=scored_results,
-            session_id=session_id,
-            student_id=student_id,
-            config=prompt_config,
-        )
-        evaluation = await evaluate_answer(
-            query=request.question,
-            answer=answer,
-            context_chunks=scored_results,
-            previous_evaluation=evaluation,
-        )
     
     processing_time = int((time.time() - start_time) * 1000)
     
     return QueryDebugResponse(
-        answer=answer.answer,
-        sources=answer.sources,
-        concepts=answer.concepts_covered,
-        confidence=answer.confidence,
+        answer=result.answer,
+        sources=result.sources,
+        concepts=result.concepts,
+        confidence=result.confidence,
         session_id=session_id,
         query_id=query_id,
-        strategy_used=strategy_decision.strategy.value,
+        strategy_used="orchestrated",
+        learning_mode=result.mode.value,
         cached=False,
         processing_time_ms=processing_time,
-        metadata=answer.metadata,
-        retrieval_results=[
-            {
-                "id": r.id,
-                "score": r.final_score,
-                "concepts": r.concepts[:5],
-            }
-            for r in scored_results[:10]
-        ],
-        strategy_decision=strategy_decision.to_dict(),
-        evaluation=evaluation.to_dict(),
-        prompt_used=prompt[:2000],  # Truncar
-        retries=retries,
+        metadata={
+            "iterations": result.iterations,
+            "mode_changes": result.mode_changes,
+        },
+        retrieval_results=[],  # Simplificado
+        strategy_decision={"mode": result.mode.value},
+        evaluation={"final_decision": result.final_decision.value},
+        prompt_used="[via orchestrator]",
+        retries=result.iterations - 1,
     )
 
 
