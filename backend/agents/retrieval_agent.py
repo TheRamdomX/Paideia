@@ -300,21 +300,26 @@ async def retrieve(
     raw_vector = 0
     raw_bm25 = 0
     raw_graph = 0
-    
+    embed_time = 0
+    search_time = 0
+    graph_time = 0
+
     try:
         # Importar componentes de retrieval
-        from backend.retrieval.vector import search_similar
-        from backend.retrieval.bm25 import search_bm25
-        from backend.retrieval.hybrid_ranker import merge_and_rank
-        from backend.graph.traversal import expand_by_concepts
-        from backend.ingestion.vectorizer import get_embedding
-        
+        # NOTA: las funciones de búsqueda resuelven la conexión con get_db();
+        # el parámetro `database` se mantiene en la firma pública pero la
+        # selección de base se hace en la capa de dependencias (db/pool.py).
+        from backend.graph.traversal import expand_concepts
+        from backend.models.embeddings import embed_text
+        from backend.retrieval.bm25 import search_text
+        from backend.retrieval.vector import search_by_embedding
+
         # 1. Obtener embedding de la query
         embed_start = time.time()
-        query_embedding = await get_embedding(
+        query_embedding = await embed_text(
             query,
-            openai_api_key=openai_api_key,
-            google_api_key=google_api_key,
+            user_openai_key=openai_api_key,
+            user_google_key=google_api_key,
         )
         embed_time = int((time.time() - embed_start) * 1000)
         
@@ -333,89 +338,80 @@ async def retrieve(
             
         elif strategy.strategy == RetrievalStrategy.VECTOR_ONLY:
             # Solo vector search
-            vector_results = await search_similar(
-                embedding=query_embedding,
-                top_k=strategy.top_k,
-                min_score=strategy.min_score,
-                chunk_type=strategy.chunk_type_filter,
-                database=database,
+            vector_hits = _filter_chunk_type(
+                _vector_to_hits(await search_by_embedding(
+                    embedding=query_embedding,
+                    limit=strategy.top_k * 2,
+                    min_score=strategy.min_score,
+                )),
+                strategy.chunk_type_filter,
             )
-            raw_vector = len(vector_results)
-            results = [_convert_to_item(r) for r in vector_results]
-            
+            raw_vector = len(vector_hits)
+            results = [_convert_to_item(h) for h in vector_hits[:strategy.top_k]]
+
         elif strategy.strategy == RetrievalStrategy.BM25_ONLY:
             # Solo BM25
-            bm25_results = await search_bm25(
-                query=query,
-                top_k=strategy.top_k,
-                chunk_type=strategy.chunk_type_filter,
-                database=database,
+            bm25_hits = _filter_chunk_type(
+                _bm25_to_hits(await search_text(
+                    query=query,
+                    limit=strategy.top_k * 2,
+                )),
+                strategy.chunk_type_filter,
             )
-            raw_bm25 = len(bm25_results)
-            results = [_convert_to_item(r) for r in bm25_results]
-            
+            raw_bm25 = len(bm25_hits)
+            results = [_convert_to_item(h) for h in bm25_hits[:strategy.top_k]]
+
         elif strategy.strategy in [RetrievalStrategy.HYBRID, RetrievalStrategy.GRAPH_ENHANCED]:
             # Hybrid: Vector + BM25
-            vector_results = await search_similar(
-                embedding=query_embedding,
-                top_k=strategy.top_k * 2,  # Más para merge
-                min_score=strategy.min_score * 0.8,
-                chunk_type=strategy.chunk_type_filter,
-                database=database,
+            vector_hits = _filter_chunk_type(
+                _vector_to_hits(await search_by_embedding(
+                    embedding=query_embedding,
+                    limit=strategy.top_k * 2,  # Más para merge
+                    min_score=strategy.min_score * 0.8,
+                )),
+                strategy.chunk_type_filter,
             )
-            raw_vector = len(vector_results)
-            
-            bm25_results = await search_bm25(
-                query=query,
-                top_k=strategy.top_k * 2,
-                chunk_type=strategy.chunk_type_filter,
-                database=database,
+            raw_vector = len(vector_hits)
+
+            bm25_hits = _filter_chunk_type(
+                _bm25_to_hits(await search_text(
+                    query=query,
+                    limit=strategy.top_k * 2,
+                )),
+                strategy.chunk_type_filter,
             )
-            raw_bm25 = len(bm25_results)
-            
-            # Merge y ranking
-            merged = await merge_and_rank(
-                vector_results=vector_results,
-                bm25_results=bm25_results,
-                vector_weight=strategy.vector_weight,
-                bm25_weight=strategy.bm25_weight,
-                top_k=strategy.top_k,
-            )
-            
-            results = [_convert_to_item(r) for r in merged]
-            
+            raw_bm25 = len(bm25_hits)
+
+            graph_hits: List[Dict[str, Any]] = []
+
             # Si es GRAPH_ENHANCED, expandir por conceptos
             if strategy.strategy == RetrievalStrategy.GRAPH_ENHANCED and strategy.expand_graph:
                 graph_start = time.time()
-                
-                # Extraer conceptos de los resultados
-                concepts = set()
-                for r in results[:5]:  # Top 5
-                    concepts.update(r.concepts)
-                
-                if concepts:
-                    graph_results = await expand_by_concepts(
-                        concepts=list(concepts),
-                        exclude_ids=[r.id for r in results],
-                        top_k=strategy.top_k // 2,
-                        database=database,
+
+                concept_ids = await _seed_concept_ids(
+                    query=query,
+                    hits=vector_hits + bm25_hits,
+                )
+
+                if concept_ids:
+                    traversal = await expand_concepts(
+                        concept_ids=concept_ids,
+                        max_depth=2,
+                        max_nodes=max(strategy.top_k, 10),
                     )
-                    raw_graph = len(graph_results)
-                    
-                    # Agregar con peso de graph
-                    for gr in graph_results:
-                        item = _convert_to_item(gr)
-                        item.score *= strategy.graph_weight
-                        results.append(item)
-                    
-                    # Re-ordenar
-                    results.sort(key=lambda x: x.score, reverse=True)
-                    results = results[:strategy.top_k]
-                
+                    graph_hits = _graph_to_hits(traversal)
+                    raw_graph = len(graph_hits)
+
                 graph_time = int((time.time() - graph_start) * 1000)
-            else:
-                graph_time = 0
-        
+
+            # Merge y ranking con los pesos del modo
+            results = _merge_and_rank(
+                vector_hits=vector_hits,
+                bm25_hits=bm25_hits,
+                graph_hits=graph_hits,
+                strategy=strategy,
+            )
+
         search_time = int((time.time() - search_start) * 1000)
         
     except ImportError as e:
@@ -441,12 +437,192 @@ async def retrieve(
         mode=actual_mode,
         query_embedding_time_ms=embed_time,
         search_time_ms=search_time,
-        graph_time_ms=graph_time if 'graph_time' in dir() else 0,
+        graph_time_ms=graph_time,
         total_time_ms=total_time,
         raw_vector_results=raw_vector,
         raw_bm25_results=raw_bm25,
         raw_graph_results=raw_graph,
     )
+
+
+# ==========================================
+# Normalización de resultados por fuente
+# ==========================================
+
+def _hit_fields(metadata: Optional[Dict[str, Any]]) -> Tuple[str, str, List[str]]:
+    """Extrae chunk_type, source y conceptos desde la metadata de un nodo."""
+    metadata = metadata or {}
+    chunk_type = metadata.get("chunk_type") or metadata.get("type") or "chunk"
+    source = metadata.get("source") or metadata.get("source_id") or ""
+    concepts = metadata.get("concepts") or []
+    return str(chunk_type), str(source), list(concepts)
+
+
+def _make_hit(
+    node_id: str,
+    content: str,
+    score: float,
+    metadata: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Construye el dict común que consumen el ranker y _convert_to_item."""
+    chunk_type, source, concepts = _hit_fields(metadata)
+    return {
+        "id": str(node_id),
+        "content": content or "",
+        "score": float(score or 0.0),
+        "chunk_type": chunk_type,
+        "source": source,
+        "concepts": concepts,
+        "metadata": metadata or {},
+    }
+
+
+def _vector_to_hits(results: List[Any]) -> List[Dict[str, Any]]:
+    """Normaliza los VectorResult de la búsqueda vectorial."""
+    return [
+        _make_hit(r.id, r.content, r.score, r.metadata)
+        for r in results
+    ]
+
+
+def _bm25_to_hits(response: Any) -> List[Dict[str, Any]]:
+    """Normaliza la BM25SearchResponse de la búsqueda literal."""
+    hits = []
+    for r in getattr(response, "results", []):
+        hit = _make_hit(r.id, r.content, r.score, r.metadata)
+        hit["highlights"] = list(getattr(r, "highlights", []))
+        hits.append(hit)
+    return hits
+
+
+def _graph_to_hits(traversal: Any) -> List[Dict[str, Any]]:
+    """
+    Normaliza el TraversalResult del recorrido del grafo.
+
+    Incluye tanto los chunks de evidencia como la descripción de los
+    conceptos visitados: ambos son contexto válido para el LLM.
+    """
+    hits = []
+
+    for chunk in traversal.chunks_found:
+        hits.append(_make_hit(
+            chunk.get("id", ""),
+            chunk.get("content", ""),
+            chunk.get("relevance", 0.5),
+            chunk.get("metadata", {}),
+        ))
+
+    for node in traversal.nodes_visited:
+        if not node.content:
+            continue
+        hits.append(_make_hit(
+            node.id,
+            node.content,
+            node.score,
+            {"type": "concept", "name": node.name, **node.metadata},
+        ))
+
+    return hits
+
+
+def _filter_chunk_type(
+    hits: List[Dict[str, Any]],
+    chunk_type: Optional[str],
+    strict: bool = False,
+) -> List[Dict[str, Any]]:
+    """
+    Filtra por tipo de chunk.
+
+    Las funciones de búsqueda no filtran por metadata en la query, así que
+    el filtro del modo se aplica acá. En modo no estricto (p. ej. PRACTICE
+    priorizando 'worked_example') un filtro que deja el resultado vacío se
+    descarta: es una preferencia, no un requisito.
+    """
+    if not chunk_type:
+        return hits
+
+    filtered = [h for h in hits if h["chunk_type"] == chunk_type]
+
+    if filtered or strict:
+        return filtered
+
+    logger.debug(
+        f"Filtro chunk_type='{chunk_type}' sin coincidencias; "
+        f"se usan los {len(hits)} resultados sin filtrar"
+    )
+    return hits
+
+
+async def _seed_concept_ids(
+    query: str,
+    hits: List[Dict[str, Any]],
+    limit: int = 5,
+) -> List[str]:
+    """
+    Determina los conceptos semilla para el recorrido del grafo.
+
+    Combina los conceptos ya presentes en los resultados (cuando vienen como
+    record id de SurrealDB) con una búsqueda de conceptos por texto.
+    """
+    from backend.graph.traversal import find_concepts_by_query
+
+    seeds: List[str] = []
+
+    for hit in hits[:5]:
+        for concept in hit.get("concepts", []):
+            concept_id = str(concept)
+            if ":" in concept_id and concept_id not in seeds:
+                seeds.append(concept_id)
+
+    for node in await find_concepts_by_query(query, limit=limit):
+        if node.id and node.id not in seeds:
+            seeds.append(node.id)
+
+    return seeds[:limit]
+
+
+def _merge_and_rank(
+    vector_hits: List[Dict[str, Any]],
+    bm25_hits: List[Dict[str, Any]],
+    graph_hits: List[Dict[str, Any]],
+    strategy: StrategyDecision,
+) -> List[RetrievalResultItem]:
+    """
+    Fusiona las tres fuentes con los pesos que dictó el modo pedagógico.
+
+    El min_score ya se aplicó por fuente; acá el corte es por top_k, porque
+    el score combinado vive en otra escala que el score crudo de cada fuente.
+    """
+    from backend.retrieval.hybrid_ranker import (
+        HybridRankingConfig,
+        combine_scores,
+        deduplicate_results,
+        select_top_k,
+    )
+
+    config = HybridRankingConfig(
+        vector_weight=strategy.vector_weight,
+        bm25_weight=strategy.bm25_weight,
+        graph_weight=strategy.graph_weight,
+        max_results=strategy.top_k * 3,  # margen para deduplicar después
+    )
+
+    combined = combine_scores(
+        {
+            "vector": vector_hits,
+            "bm25": bm25_hits,
+            "graph": graph_hits,
+        },
+        config,
+    )
+
+    unique = deduplicate_results(combined)
+    top = select_top_k(unique, k=strategy.top_k)
+
+    return [
+        _convert_to_item(_make_hit(r.id, r.content, r.final_score, r.metadata))
+        for r in top
+    ]
 
 
 # ==========================================
@@ -466,39 +642,50 @@ async def _retrieve_exercise_metadata(
     Solo: título, dificultad, conceptos, ID.
     """
     try:
-        from backend.retrieval.vector import search_similar
-        
+        from backend.retrieval.vector import search_by_embedding
+
         # Buscar ejercicios
-        results = await search_similar(
-            embedding=query_embedding,
-            top_k=strategy.top_k,
-            min_score=strategy.min_score,
-            chunk_type="exercise",
-            database=database,
+        hits = _filter_chunk_type(
+            _vector_to_hits(await search_by_embedding(
+                embedding=query_embedding,
+                limit=strategy.top_k * 2,
+                min_score=strategy.min_score,
+            )),
+            strategy.chunk_type_filter or "exercise",
+            strict=True,  # EXERCISE_LIST solo puede listar ejercicios
         )
-        
+
         items = []
-        for r in results:
+        for hit in hits[:strategy.top_k]:
+            metadata = hit["metadata"]
             # Solo metadata, contenido mínimo
             item = RetrievalResultItem(
-                id=r.get("id", ""),
+                id=hit["id"],
                 content="",  # Sin contenido para EXERCISE_LIST
-                score=r.get("score", 0.0),
+                score=hit["score"],
                 chunk_type="exercise",
-                source=r.get("source", ""),
-                concepts=r.get("concepts", []),
-                metadata=r.get("metadata", {}),
-                exercise_id=r.get("exercise_id") or r.get("id"),
-                exercise_title=r.get("title") or r.get("metadata", {}).get("title", "Sin título"),
-                difficulty=r.get("difficulty") or r.get("metadata", {}).get("difficulty", "medium"),
+                source=hit["source"],
+                concepts=hit["concepts"],
+                metadata=metadata,
+                exercise_id=metadata.get("exercise_id") or hit["id"],
+                exercise_title=metadata.get("title") or _first_line(hit["content"]),
+                difficulty=metadata.get("difficulty", "medium"),
             )
             items.append(item)
-        
+
         return items
         
     except Exception as e:
         logger.error(f"Error retrieving exercise metadata: {e}")
         return []
+
+
+def _first_line(content: str, max_chars: int = 80) -> str:
+    """Primera línea del chunk, usada como título cuando no hay metadata."""
+    line = (content or "").strip().split("\n")[0].strip()
+    if not line:
+        return "Sin título"
+    return line[:max_chars]
 
 
 def _convert_to_item(raw_result: Any) -> RetrievalResultItem:

@@ -257,13 +257,22 @@ GOOGLE_MODELS: Dict[str, ModelConfig] = {
         default_max_output=4_096,
         supports_vision=True,
     ),
-    "gemma": ModelConfig(
+    "gemma-3": ModelConfig(
         name="Gemma 3",
         api_name="gemma-3-27b-it",
         provider="google",
         context_window=12_000,
         max_output_tokens=4_096,
         default_max_output=2_048,
+        supports_vision=True,
+    ),
+    "gemma-4": ModelConfig(
+        name="Gemma 4",
+        api_name="gemma-4-31b-it",
+        provider="google",
+        context_window=256_000,
+        max_output_tokens=32_768,
+        default_max_output=4_096,
         supports_vision=True,
     )
 }
